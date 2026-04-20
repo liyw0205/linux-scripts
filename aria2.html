@@ -1,0 +1,2581 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aria2 管理器</title>
+  <style>
+    :root{
+      --bg:#0b1220;
+      --panel:#121a2b;
+      --panel2:#182235;
+      --panel3:#10192b;
+      --text:#e8eefc;
+      --muted:#9fb0d1;
+      --line:#293754;
+      --primary:#58a6ff;
+      --ok:#3fb950;
+      --warn:#d29922;
+      --danger:#f85149;
+      --chip:#22304d;
+      --shadow:0 10px 25px rgba(0,0,0,.28);
+      --radius:14px;
+      --sidebar-width:290px;
+    }
+
+    *{box-sizing:border-box}
+    html,body{margin:0}
+    body{
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans CJK SC","Microsoft YaHei",sans-serif;
+      background:linear-gradient(180deg,#0b1220,#0e1526 35%,#0a1120);
+      color:var(--text);
+    }
+
+    .layout{
+      display:grid;
+      grid-template-columns: var(--sidebar-width) 1fr;
+      min-height:100vh;
+    }
+
+    .sidebar{
+      background:rgba(12,18,32,.96);
+      border-right:1px solid var(--line);
+      position:sticky;
+      top:0;
+      height:100vh;
+      overflow:auto;
+      z-index:40;
+      padding:14px;
+    }
+
+    .sidebar-brand{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:8px 2px 14px;
+      margin-bottom:8px;
+    }
+
+    .brand-title{
+      font-size:20px;
+      font-weight:900;
+      letter-spacing:.5px;
+    }
+
+    .brand-sub{
+      font-size:12px;
+      color:var(--muted);
+      margin-top:4px;
+    }
+
+    .main{
+      min-width:0;
+      padding:14px;
+    }
+
+    .app{
+      max-width:1520px;
+      margin:0 auto;
+      display:grid;
+      gap:14px;
+    }
+
+    .card{
+      background:rgba(18,26,43,.92);
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+    }
+    .card .hd{
+      padding:14px 16px;
+      border-bottom:1px solid var(--line);
+      font-weight:700;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .card .bd{padding:14px 16px}
+
+    .topbar{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+    }
+    .topbar-left{min-width:0;flex:1}
+    .title-block{
+      display:flex;
+      flex-direction:column;
+      gap:5px;
+      min-width:0;
+    }
+    .title-main{
+      font-size:18px;
+      font-weight:800;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .title-sub{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      color:var(--muted);
+      font-size:13px;
+    }
+    .server-brief{
+      min-width:0;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+
+    .conn-badge,.speed-badge{
+      display:inline-flex;
+      align-items:center;
+      padding:3px 10px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:700;
+      white-space:nowrap;
+    }
+    .conn-badge{border:1px solid transparent}
+    .conn-badge.online{
+      background:#14301f;
+      color:#83e39a;
+      border-color:#245a35;
+    }
+    .conn-badge.offline{
+      background:#4b1f2b;
+      color:#ff9db1;
+      border-color:#733142;
+    }
+    .conn-badge.checking{
+      background:#17304f;
+      color:#8cc2ff;
+      border-color:#2f5b91;
+    }
+    .speed-badge{
+      gap:6px;
+      border:1px solid #35507d;
+      background:#15233b;
+      color:#cfe0ff;
+    }
+
+    .mobile-menu-btn{
+      width:auto;
+      min-width:44px;
+      display:none;
+    }
+
+    .sidebar-section{
+      border:1px solid var(--line);
+      border-radius:12px;
+      overflow:hidden;
+      background:#162239;
+      margin-bottom:12px;
+    }
+    .sidebar-title{
+      padding:12px 14px;
+      border-bottom:1px solid var(--line);
+      background:#10192b;
+      color:#dbe7ff;
+      font-weight:700;
+    }
+
+    .nav-item,.menu-item{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding:12px 14px;
+      border-top:1px solid rgba(41,55,84,.55);
+      cursor:pointer;
+      color:#d7e4ff;
+    }
+    .nav-item:first-of-type,
+    .menu-item:first-of-type{border-top:none}
+    .nav-item:hover,.menu-item:hover{background:rgba(255,255,255,.03)}
+    .nav-item.active,.menu-item.active{
+      background:#1b2c49;
+      box-shadow:inset 3px 0 0 #64a7ff;
+    }
+
+    .menu-count{
+      font-size:12px;
+      border-radius:999px;
+      padding:2px 8px;
+      background:#1a2942;
+      border:1px solid #32456f;
+      color:#c9dbff;
+    }
+
+    .page{display:none}
+    .page.active{display:block}
+
+    label{
+      display:block;
+      font-size:13px;
+      color:var(--muted);
+      margin-bottom:6px;
+    }
+    input,select,button,textarea{
+      width:100%;
+      border:1px solid var(--line);
+      background:#0f1728;
+      color:var(--text);
+      border-radius:10px;
+      padding:10px 12px;
+      font-size:14px;
+    }
+    textarea{min-height:80px;resize:vertical}
+    button{
+      cursor:pointer;
+      background:linear-gradient(180deg,#1d4ed8,#1d3ea8);
+      border:none;
+      transition:.15s ease;
+    }
+    button:hover{filter:brightness(1.06)}
+    button.secondary{
+      background:#1a2438;
+      border:1px solid var(--line);
+    }
+    button.ok{background:linear-gradient(180deg,#238636,#1f6f2d)}
+    button.warn{background:linear-gradient(180deg,#8b6a12,#6f520f)}
+    button.danger{background:linear-gradient(180deg,#b62324,#8f1f20)}
+    button:disabled{
+      opacity:.55;
+      cursor:not-allowed;
+      filter:none;
+    }
+
+    .row,.row3,.row4{
+      display:grid;
+      gap:10px;
+      margin-bottom:10px;
+    }
+    .row{grid-template-columns:1fr 1fr}
+    .row3{grid-template-columns:repeat(3,1fr)}
+    .row4{grid-template-columns:repeat(4,1fr)}
+    @media (max-width: 1100px){
+      .row4,.row3{grid-template-columns:1fr 1fr}
+    }
+    @media (max-width: 720px){
+      .row,.row3,.row4{grid-template-columns:1fr}
+    }
+
+    .server-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+    .chip{
+      background:var(--chip);
+      color:#dce7ff;
+      border:1px solid #32456f;
+      border-radius:999px;
+      padding:8px 12px;
+      font-size:13px;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      cursor:pointer;
+    }
+    .chip.active{
+      border-color:#6aa8ff;
+      box-shadow:0 0 0 2px rgba(88,166,255,.18) inset;
+    }
+
+    .info-grid{
+      display:grid;
+      grid-template-columns:repeat(4,1fr);
+      gap:10px;
+    }
+    @media (max-width: 1200px){ .info-grid{grid-template-columns:repeat(2,1fr)} }
+    @media (max-width: 720px){ .info-grid{grid-template-columns:1fr} }
+
+    .stat-box{
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#162239;
+      padding:12px;
+    }
+    .stat-box .k{font-size:12px;color:var(--muted);margin-bottom:6px}
+    .stat-box .v{font-size:16px;font-weight:700;word-break:break-word}
+
+    .section-card{
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#162239;
+      overflow:hidden;
+      margin-bottom:12px;
+    }
+    .section-card .shd{
+      padding:12px 14px;
+      border-bottom:1px solid var(--line);
+      font-weight:700;
+      background:#10192b;
+    }
+    .section-card .sbd{
+      padding:12px 14px;
+    }
+
+    .tasks-main{
+      display:grid;
+      grid-template-columns: 380px 1fr;
+      gap:14px;
+    }
+    @media (max-width: 1200px){
+      .tasks-main{
+        grid-template-columns: 340px 1fr;
+      }
+    }
+    @media (max-width: 980px){
+      .tasks-main{
+        grid-template-columns:1fr;
+      }
+    }
+
+    .task-toolbar{
+      display:grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap:10px;
+      margin-bottom:12px;
+    }
+    @media (max-width: 1280px){
+      .task-toolbar{grid-template-columns: repeat(3, 1fr);}
+    }
+    @media (max-width: 720px){
+      .task-toolbar{grid-template-columns: repeat(2, 1fr);}
+    }
+
+    .task-filter-box{
+      display:grid;
+      gap:10px;
+      margin-bottom:12px;
+    }
+
+    .task-list{
+      display:grid;
+      gap:10px;
+      max-height:72vh;
+      overflow:auto;
+    }
+
+    .task{
+      border:1px solid var(--line);
+      background:var(--panel2);
+      border-radius:12px;
+      padding:12px;
+      cursor:pointer;
+    }
+    .task.active{
+      border-color:var(--primary);
+      box-shadow:0 0 0 1px rgba(88,166,255,.28) inset;
+    }
+    .task.selected-op{
+      box-shadow:0 0 0 2px rgba(63,185,80,.28) inset;
+      border-color:#3fb950;
+    }
+    .task-top{
+      display:flex;
+      gap:8px;
+      align-items:flex-start;
+      margin-bottom:8px;
+    }
+    .task-op-check{
+      width:18px;
+      height:18px;
+      margin-top:2px;
+      accent-color:#4f8df7;
+      flex:0 0 auto;
+    }
+    .task-title{
+      font-weight:700;
+      line-height:1.4;
+      word-break:break-word;
+      margin-bottom:6px;
+    }
+    .task-meta{
+      font-size:12px;
+      color:var(--muted);
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px 12px;
+    }
+
+    .status{
+      display:inline-block;
+      padding:2px 8px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:700;
+    }
+    .status.active{background:#17304f;color:#8cc2ff}
+    .status.waiting{background:#3a2f12;color:#ffd479}
+    .status.paused{background:#452020;color:#ffb3ad}
+    .status.complete{background:#14301f;color:#83e39a}
+    .status.error{background:#4b1f2b;color:#ff9db1}
+
+    .summary{font-size:13px;color:var(--muted)}
+    .badge{
+      font-size:12px;
+      padding:3px 8px;
+      border-radius:999px;
+      background:#16243b;
+      color:#b8cbef;
+      border:1px solid #2a3d63;
+    }
+
+    .pathbar{
+      display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+      margin-bottom:10px;
+    }
+    .crumb{
+      background:#17243a;border:1px solid #2b4067;color:#dce8ff;
+      padding:6px 10px;border-radius:999px;cursor:pointer;font-size:13px;
+    }
+
+    .actions-top{
+      display:grid;
+      grid-template-columns:1fr 140px;
+      gap:10px;
+      margin-bottom:12px;
+      align-items:end;
+    }
+    @media (max-width: 720px){
+      .actions-top{grid-template-columns:1fr}
+    }
+
+    .compact-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-bottom:12px;
+    }
+    .compact-actions button{
+      width:auto;
+      min-width:110px;
+      padding:9px 12px;
+    }
+
+    .more-panel{
+      display:none;
+      margin-bottom:12px;
+      padding:12px;
+      border:1px solid var(--line);
+      border-radius:12px;
+      background:#10192b;
+    }
+    .more-panel.show{display:block}
+    .more-grid{
+      display:grid;
+      grid-template-columns:repeat(4,1fr);
+      gap:10px;
+    }
+    @media (max-width: 980px){
+      .more-grid{grid-template-columns:1fr 1fr}
+    }
+    @media (max-width: 720px){
+      .more-grid{grid-template-columns:1fr}
+    }
+
+    .tree-wrap{
+      border:1px solid var(--line);
+      border-radius:12px;
+      overflow:hidden;
+    }
+    .tree-head{
+      padding:12px;
+      border-bottom:1px solid var(--line);
+      background:#10192b;
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .tree-head .left,.tree-head .right{
+      display:flex;
+      flex-wrap:wrap;
+      gap:8px;
+      align-items:center;
+    }
+    .tree{
+      padding:8px;
+      max-height:72vh;
+      overflow:auto;
+    }
+
+    .node{border-radius:10px}
+    .node-children{
+      margin-left:18px;
+      border-left:1px dashed rgba(159,176,209,.18);
+      padding-left:8px;
+    }
+    .node-row{
+      display:grid;
+      grid-template-columns: 26px 22px minmax(0,1fr) auto auto;
+      gap:8px;
+      align-items:center;
+      padding:8px 10px;
+      border-radius:10px;
+      min-height:42px;
+    }
+    .node-row:hover{background:rgba(255,255,255,.03)}
+    .node-row.is-dir-current{background:rgba(88,166,255,.09)}
+
+    .toggle{
+      width:26px;height:26px;border:none;border-radius:8px;
+      background:#16233a;color:#d5e4ff;padding:0;
+      display:flex;align-items:center;justify-content:center;
+      font-size:14px;
+    }
+    .toggle.empty{visibility:hidden}
+    .check{width:18px;height:18px;accent-color:#4f8df7}
+    .name{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      min-width:0;
+      overflow:hidden;
+      cursor:pointer;
+    }
+    .name .txt{
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      min-width:0;
+    }
+    .folder{color:#ffd479}
+    .file{color:#dbe7ff}
+    .muted{color:var(--muted)}
+    .small{font-size:12px}
+
+    .detail-backbar{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      min-width:0;
+    }
+    .detail-backbar button{
+      width:auto;
+      min-width:88px;
+    }
+
+    .floating-save{
+      position:fixed;
+      right:16px;
+      bottom:18px;
+      z-index:10000;
+      width:auto;
+      min-width:128px;
+      box-shadow:var(--shadow);
+      display:none;
+    }
+
+    .modal{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.5);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding:16px;
+      z-index:12000;
+    }
+    .modal.show{display:flex}
+    .modal-panel{
+      width:min(760px,100%);
+      max-height:90vh;
+      overflow:auto;
+      border:1px solid var(--line);
+      border-radius:16px;
+      background:#111a2c;
+      box-shadow:var(--shadow);
+    }
+    .modal-hd{
+      padding:14px 16px;
+      border-bottom:1px solid var(--line);
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+      font-weight:700;
+    }
+    .modal-bd{
+      padding:14px 16px;
+    }
+    .close-btn{
+      width:auto;
+      min-width:90px;
+    }
+
+    .sidebar-overlay{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.45);
+      z-index:35;
+      display:none;
+    }
+    .sidebar-overlay.show{display:block}
+
+    @media (max-width: 980px){
+      .layout{
+        grid-template-columns:1fr;
+      }
+
+      .sidebar{
+        position:fixed;
+        left:0;
+        top:0;
+        bottom:0;
+        width:min(84vw, 320px);
+        height:auto;
+        transform:translateX(-105%);
+        transition:transform .25s ease;
+        z-index:50;
+        border-right:1px solid var(--line);
+        border-radius:0 16px 16px 0;
+      }
+
+      .sidebar.open{
+        transform:translateX(0);
+      }
+
+      .main{
+        padding:10px;
+      }
+
+      .mobile-menu-btn{
+        display:inline-flex;
+        align-items:center;
+        justify-content:center;
+      }
+
+      .card.detail-mobile-fullscreen{
+        position:fixed;
+        inset:0;
+        z-index:9998;
+        margin:0;
+        max-width:none;
+        border-radius:0;
+        height:100vh;
+        display:flex;
+        flex-direction:column;
+      }
+      .card.detail-mobile-fullscreen .hd{
+        position:sticky;
+        top:0;
+        z-index:3;
+        background:rgba(18,26,43,.98);
+      }
+      .card.detail-mobile-fullscreen .bd{
+        flex:1;
+        overflow:auto;
+      }
+      .card.detail-mobile-fullscreen .tree{
+        max-height:none;
+      }
+      .floating-save.show{
+        display:inline-block;
+      }
+    }
+
+    @media (max-width: 720px){
+      .node-row{
+        grid-template-columns: 24px 20px minmax(0,1fr) auto;
+        gap:6px;
+        padding:8px 8px;
+      }
+      .node-row .muted.small:last-child{
+        font-size:11px;
+        max-width:72px;
+        text-align:right;
+        white-space:normal;
+        line-height:1.2;
+      }
+      .name .txt{
+        white-space:normal;
+        overflow:visible;
+        text-overflow:clip;
+        word-break:break-all;
+        line-height:1.25;
+      }
+      .title-sub{
+        flex-direction:column;
+        align-items:flex-start;
+      }
+      .server-brief{
+        white-space:normal;
+        overflow:visible;
+        text-overflow:clip;
+        word-break:break-all;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+  <div class="layout">
+    <aside id="appSidebar" class="sidebar">
+      <div class="sidebar-brand">
+        <div>
+          <div class="brand-title">Aria2</div>
+          <div class="brand-sub">BT / RPC 管理器</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-title">页面</div>
+        <div class="nav-item active" data-page="page-tasks">任务</div>
+        <div class="nav-item" data-page="page-config">配置</div>
+        <div class="nav-item" data-page="page-servers">服务器</div>
+      </div>
+
+      <div class="sidebar-section" id="sidebarTaskSection">
+        <div class="sidebar-title">任务分类</div>
+        <div class="menu-item active" data-category="active">
+          <span>正在下载</span>
+          <span class="menu-count" id="count_active">0</span>
+        </div>
+        <div class="menu-item" data-category="waiting">
+          <span>正在等待</span>
+          <span class="menu-count" id="count_waiting">0</span>
+        </div>
+        <div class="menu-item" data-category="paused">
+          <span>已暂停</span>
+          <span class="menu-count" id="count_paused">0</span>
+        </div>
+        <div class="menu-item" data-category="complete">
+          <span>已完成 / 已停止</span>
+          <span class="menu-count" id="count_complete">0</span>
+        </div>
+        <div class="menu-item" data-category="error">
+          <span>出错</span>
+          <span class="menu-count" id="count_error">0</span>
+        </div>
+        <div class="menu-item" data-category="all">
+          <span>全部</span>
+          <span class="menu-count" id="count_all">0</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section" id="sidebarBatchSection">
+        <div class="sidebar-title">批量操作</div>
+        <div class="menu-item" id="btnSelectAllVisibleTasks"><span>全选当前列表</span></div>
+        <div class="menu-item" id="btnClearSelectedTasks"><span>清空任务勾选</span></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="app">
+        <div class="card">
+          <div class="hd topbar">
+            <div class="topbar-left">
+              <div class="title-block">
+                <div class="title-main">
+                  <button id="btnMobileMenu" class="secondary mobile-menu-btn">☰</button>
+                  <span>Aria2 BT 管理器</span>
+                </div>
+                <div class="title-sub">
+                  <span id="topServerName" class="server-brief">未选择服务器</span>
+                  <span id="topServerStatus" class="conn-badge offline">未连接</span>
+                  <span id="topGlobalSpeed" class="speed-badge">↓ 0 B/s ↑ 0 B/s</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="page-servers" class="page">
+          <div class="row">
+            <div class="card">
+              <div class="hd">服务器配置</div>
+              <div class="bd">
+                <div class="row">
+                  <div>
+                    <label>服务器名称</label>
+                    <input id="serverName" placeholder="例如：家里 aria2" />
+                  </div>
+                  <div>
+                    <label>RPC 地址</label>
+                    <input id="rpcUrl" placeholder="例如：http://127.0.0.1:6800/jsonrpc" />
+                  </div>
+                </div>
+                <div class="row">
+                  <div>
+                    <label>RPC Secret</label>
+                    <input id="rpcSecret" placeholder="留空表示无密钥" />
+                  </div>
+                  <div>
+                    <label>当前服务器</label>
+                    <select id="serverSelect"></select>
+                  </div>
+                </div>
+                <div class="row4">
+                  <button id="btnSaveServer">保存服务器</button>
+                  <button id="btnDeleteServer" class="danger">删除服务器</button>
+                  <button id="btnConnect" class="ok">连接测试</button>
+                  <button id="btnReloadServerState" class="secondary">重载服务器数据</button>
+                </div>
+                <div class="server-list" id="serverChips"></div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="hd">当前服务器状态</div>
+              <div class="bd">
+                <div class="info-grid">
+                  <div class="stat-box">
+                    <div class="k">服务器名称</div>
+                    <div class="v" id="infoServerName">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">RPC 地址</div>
+                    <div class="v" id="infoServerUrl">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">aria2 版本</div>
+                    <div class="v" id="infoVersion">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">下载目录</div>
+                    <div class="v" id="infoDir">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">全局下载速度</div>
+                    <div class="v" id="infoDownloadSpeed">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">全局上传速度</div>
+                    <div class="v" id="infoUploadSpeed">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">活动任务数</div>
+                    <div class="v" id="infoNumActive">-</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="k">等待任务数</div>
+                    <div class="v" id="infoNumWaiting">-</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="page-tasks" class="page active">
+          <div class="tasks-main">
+            <div class="card" id="taskListCard">
+              <div class="hd">
+                <span>任务列表</span>
+                <span class="summary" id="taskListSummary">未加载任务</span>
+              </div>
+              <div class="bd">
+                <div class="task-toolbar">
+                  <button id="btnOpenAddUri">新建 URL</button>
+                  <button id="btnOpenAddTorrent">新建 Torrent</button>
+                  <button id="btnPauseSelected" class="warn">暂停选中</button>
+                  <button id="btnResumeSelected" class="secondary">恢复选中</button>
+                  <button id="btnRemoveSelected" class="danger">删除选中</button>
+                </div>
+
+                <div class="task-filter-box">
+                  <div>
+                    <label>搜索任务</label>
+                    <input id="taskSearch" placeholder="按任务名搜索" />
+                  </div>
+                  <div class="row">
+                    <div>
+                      <label>文件筛选</label>
+                      <select id="fileFilter">
+                        <option value="all">全部文件</option>
+                        <option value="video">仅视频文件</option>
+                        <option value="ext">按后缀筛选</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnRefreshTasks" class="secondary">刷新任务</button>
+                    </div>
+                  </div>
+                  <div>
+                    <label>后缀筛选</label>
+                    <input id="fileExtFilter" placeholder="例如：mp4,mkv,srt,ass" />
+                  </div>
+                </div>
+
+                <div class="task-list" id="taskList"></div>
+              </div>
+            </div>
+
+            <div class="card" id="treeCard">
+              <div class="hd">
+                <div class="detail-backbar">
+                  <button id="btnBackFromDetail" class="secondary" style="display:none;">← 返回</button>
+                  <span>BT 文件树</span>
+                </div>
+                <span class="summary" id="summaryText">未选择任务</span>
+              </div>
+              <div class="bd">
+                <div id="pathBar" class="pathbar"></div>
+
+                <div class="actions-top">
+                  <div>
+                    <label>快速选择表达式</label>
+                    <input id="exprInput" placeholder="例如：>10 / <20 / 10-20 / 10+5 / !1-5" />
+                  </div>
+                  <div>
+                    <label>&nbsp;</label>
+                    <button id="btnApplyExpr" class="warn">应用表达式</button>
+                  </div>
+                </div>
+
+                <div class="compact-actions">
+                  <button id="btnSaveSelection" class="ok">保存到 aria2</button>
+                  <button id="btnToggleMore" class="secondary">更多操作</button>
+                </div>
+
+                <div id="morePanel" class="more-panel">
+                  <div class="more-grid">
+                    <div>
+                      <label>选择范围</label>
+                      <select id="exprScope">
+                        <option value="current">当前目录</option>
+                        <option value="all">整个任务</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label>排序</label>
+                      <select id="sortMode">
+                        <option value="default">默认排序</option>
+                        <option value="name">文件名排序</option>
+                        <option value="size">文件大小排序</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnReloadFiles" class="secondary">重载文件树</button>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnCurrentSelectAll" class="secondary">当前目录全选</button>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnCurrentUnselectAll" class="secondary">当前目录取消</button>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnExpandAll" class="secondary">全部展开</button>
+                    </div>
+                    <div>
+                      <label>&nbsp;</label>
+                      <button id="btnCollapseAll" class="secondary">全部收起</button>
+                    </div>
+                    <div>
+                      <label>说明</label>
+                      <input value="支持 ! 取反，按文件编号 index 选择" disabled />
+                    </div>
+                  </div>
+                </div>
+
+                <div class="tree-wrap">
+                  <div class="tree-head">
+                    <div class="left">
+                      <span class="badge" id="taskTitleBadge">未选择任务</span>
+                      <span class="badge" id="dirBadge">目录：/</span>
+                    </div>
+                    <div class="right">
+                      <span class="badge" id="countBadge">选中 0 / 0</span>
+                    </div>
+                  </div>
+                  <div class="tree" id="tree"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="page-config" class="page">
+          <div class="card">
+            <div class="hd">
+              <span>aria2 运行配置</span>
+              <span class="summary" id="configSummary">未加载配置</span>
+            </div>
+            <div class="bd">
+              <div class="section-card">
+                <div class="shd">基本设置</div>
+                <div class="sbd">
+                  <div class="row">
+                    <div><label>下载目录 dir</label><input id="cfg_dir" /></div>
+                    <div><label>用户代理 user-agent</label><input id="cfg_user_agent" /></div>
+                  </div>
+                  <div class="row4">
+                    <div><label>max-concurrent-downloads</label><input id="cfg_mcd" /></div>
+                    <div><label>continue</label><input id="cfg_continue" placeholder="true / false" /></div>
+                    <div><label>check-integrity</label><input id="cfg_check_integrity" placeholder="true / false" /></div>
+                    <div><label>disk-cache</label><input id="cfg_disk_cache" placeholder="例如 64M" /></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="section-card">
+                <div class="shd">HTTP / FTP / SFTP</div>
+                <div class="sbd">
+                  <div class="row4">
+                    <div><label>max-connection-per-server</label><input id="cfg_mcps" /></div>
+                    <div><label>split</label><input id="cfg_split" /></div>
+                    <div><label>min-split-size</label><input id="cfg_mss" /></div>
+                    <div><label>lowest-speed-limit</label><input id="cfg_lsl" /></div>
+                  </div>
+                  <div class="row">
+                    <div><label>all-proxy</label><input id="cfg_all_proxy" /></div>
+                    <div><label>http-proxy</label><input id="cfg_http_proxy" /></div>
+                  </div>
+                  <div class="row">
+                    <div><label>https-proxy</label><input id="cfg_https_proxy" /></div>
+                    <div><label>ftp-pasv</label><input id="cfg_ftp_pasv" placeholder="true / false" /></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="section-card">
+                <div class="shd">BitTorrent 设置</div>
+                <div class="sbd">
+                  <div class="row4">
+                    <div><label>seed-time</label><input id="cfg_seed_time" /></div>
+                    <div><label>seed-ratio</label><input id="cfg_seed_ratio" /></div>
+                    <div><label>bt-max-peers</label><input id="cfg_bt_max_peers" /></div>
+                    <div><label>bt-request-peer-speed-limit</label><input id="cfg_bt_rpsl" /></div>
+                  </div>
+                  <div class="row4">
+                    <div><label>bt-save-metadata</label><input id="cfg_bt_save_metadata" placeholder="true / false" /></div>
+                    <div><label>bt-enable-lpd</label><input id="cfg_bt_enable_lpd" placeholder="true / false" /></div>
+                    <div><label>enable-dht</label><input id="cfg_enable_dht" placeholder="true / false" /></div>
+                    <div><label>enable-dht6</label><input id="cfg_enable_dht6" placeholder="true / false" /></div>
+                  </div>
+                  <div class="row4">
+                    <div><label>enable-peer-exchange</label><input id="cfg_enable_peer_exchange" placeholder="true / false" /></div>
+                    <div><label>follow-torrent</label><input id="cfg_follow_torrent" placeholder="true / false" /></div>
+                    <div><label>bt-tracker</label><textarea id="cfg_bt_tracker" placeholder="多个 tracker 可用逗号或换行分隔"></textarea></div>
+                    <div><label>max-download-result</label><input id="cfg_max_download_result" /></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="section-card">
+                <div class="shd">RPC / 高级设置</div>
+                <div class="sbd">
+                  <div class="row4">
+                    <div><label>rpc-listen-port</label><input id="cfg_rpc_listen_port" /></div>
+                    <div><label>rpc-allow-origin-all</label><input id="cfg_rpc_allow_origin_all" placeholder="true / false" /></div>
+                    <div><label>rpc-secure</label><input id="cfg_rpc_secure" placeholder="true / false" /></div>
+                    <div><label>rpc-save-upload-metadata</label><input id="cfg_rpc_save_upload_metadata" placeholder="true / false" /></div>
+                  </div>
+                  <div class="row4">
+                    <div><label>max-overall-download-limit</label><input id="cfg_modl" /></div>
+                    <div><label>max-overall-upload-limit</label><input id="cfg_moul" /></div>
+                    <div><label>file-allocation</label><input id="cfg_file_allocation" /></div>
+                    <div><label>disable-ipv6</label><input id="cfg_disable_ipv6" placeholder="true / false" /></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="row4">
+                <button id="btnLoadConfig" class="secondary">重新读取配置</button>
+                <button id="btnSaveConfig" class="ok">保存运行配置</button>
+                <button id="btnPauseAll" class="warn">暂停全部</button>
+                <button id="btnUnpauseAll" class="secondary">恢复全部</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <button id="btnFloatingSave" class="ok floating-save">保存到 aria2</button>
+
+  <div class="modal" id="addUriModal">
+    <div class="modal-panel">
+      <div class="modal-hd">
+        <span>新建 URL 下载</span>
+        <button class="secondary close-btn" data-close-modal="addUriModal">关闭</button>
+      </div>
+      <div class="modal-bd">
+        <div style="margin-bottom:10px">
+          <label>下载链接</label>
+          <textarea id="addUriInput" placeholder="每行一个 URL"></textarea>
+        </div>
+        <div class="row">
+          <div>
+            <label>目录 dir（可选）</label>
+            <input id="addUriDir" placeholder="留空使用默认目录" />
+          </div>
+          <div>
+            <label>文件名 out（可选，仅单链接建议使用）</label>
+            <input id="addUriOut" placeholder="例如 movie.mp4" />
+          </div>
+        </div>
+        <div class="row4">
+          <button id="btnSubmitAddUri" class="ok">提交下载</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="addTorrentModal">
+    <div class="modal-panel">
+      <div class="modal-hd">
+        <span>新建 Torrent 下载</span>
+        <button class="secondary close-btn" data-close-modal="addTorrentModal">关闭</button>
+      </div>
+      <div class="modal-bd">
+        <div class="row">
+          <div>
+            <label>Torrent 文件</label>
+            <input id="torrentFileInput" type="file" accept=".torrent,application/x-bittorrent" />
+          </div>
+          <div>
+            <label>下载目录 dir（可选）</label>
+            <input id="addTorrentDir" placeholder="留空使用默认目录" />
+          </div>
+        </div>
+        <div class="row4">
+          <button id="btnSubmitAddTorrent" class="ok">上传并创建任务</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_KEY = "aria2_multi_servers_v4";
+    const DEFAULT_SERVER_KEY = "aria2_default_server_v4";
+    const VIDEO_EXTS = ["mp4","mkv","avi","mov","wmv","flv","ts","m2ts","webm","mpg","mpeg","m4v","3gp","rmvb","rm"];
+    const HEARTBEAT_INTERVAL = 10000;
+
+    const state = {
+      servers: [],
+      currentServerId: null,
+      tasks: [],
+      selectedTask: null,
+      selectedTaskOps: new Set(),
+      currentTaskCategory: "active",
+      currentPage: "page-tasks",
+      treeRoot: null,
+      currentPath: [],
+      sortMode: "default",
+      fileFilter: "all",
+      fileExtFilter: "",
+      aria2Version: "",
+      globalOption: {},
+      globalStat: {},
+      connectionStatus: "offline",
+      heartbeatTimer: null,
+      isMobileDetailMode: false,
+      sidebarOpen: false
+    };
+
+    const $ = s => document.querySelector(s);
+    const $$ = s => [...document.querySelectorAll(s)];
+
+    function uid() {
+      return "id_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+
+    function escapeHtml(str="") {
+      return String(str)
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#39;");
+    }
+
+    function isMobile() {
+      return window.innerWidth <= 980;
+    }
+
+    function normalizeBoolText(v) {
+      const s = String(v || "").trim().toLowerCase();
+      if (!s) return "";
+      if (["true","1","yes","on"].includes(s)) return "true";
+      if (["false","0","no","off"].includes(s)) return "false";
+      return v;
+    }
+
+    function saveServers() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.servers));
+      if (state.currentServerId) localStorage.setItem(DEFAULT_SERVER_KEY, state.currentServerId);
+    }
+
+    function loadServers() {
+      try {
+        state.servers = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      } catch {
+        state.servers = [];
+      }
+      state.currentServerId = localStorage.getItem(DEFAULT_SERVER_KEY) || state.servers[0]?.id || null;
+
+      if (!state.servers.length) {
+        const demo = { id: uid(), name: "默认服务器", url: "http://127.0.0.1:6800/jsonrpc", secret: "" };
+        state.servers.push(demo);
+        state.currentServerId = demo.id;
+        saveServers();
+      }
+      renderServerUI();
+    }
+
+    function currentServer() {
+      return state.servers.find(x => x.id === state.currentServerId) || null;
+    }
+
+    function fillServerInputs() {
+      const s = currentServer();
+      $("#serverName").value = s?.name || "";
+      $("#rpcUrl").value = s?.url || "";
+      $("#rpcSecret").value = s?.secret || "";
+      $("#serverSelect").value = s?.id || "";
+    }
+
+    function renderTopStatus() {
+      const s = currentServer();
+      $("#topServerName").textContent = s ? `${s.name} · ${s.url}` : "未选择服务器";
+
+      const el = $("#topServerStatus");
+      el.className = "conn-badge " + state.connectionStatus;
+      if (state.connectionStatus === "online") el.textContent = "已连接";
+      else if (state.connectionStatus === "checking") el.textContent = "检测中";
+      else el.textContent = "未连接";
+
+      const dl = Number(state.globalStat.downloadSpeed || 0);
+      const ul = Number(state.globalStat.uploadSpeed || 0);
+      $("#topGlobalSpeed").textContent = `↓ ${formatBytes(dl)}/s ↑ ${formatBytes(ul)}/s`;
+    }
+
+    function renderServerUI() {
+      const select = $("#serverSelect");
+      select.innerHTML = "";
+      state.servers.forEach(s => {
+        const opt = document.createElement("option");
+        opt.value = s.id;
+        opt.textContent = `${s.name} - ${s.url}`;
+        if (s.id === state.currentServerId) opt.selected = true;
+        select.appendChild(opt);
+      });
+
+      const chips = $("#serverChips");
+      chips.innerHTML = "";
+      state.servers.forEach(s => {
+        const div = document.createElement("div");
+        div.className = "chip" + (s.id === state.currentServerId ? " active" : "");
+        div.textContent = s.name;
+        div.onclick = async () => {
+          state.currentServerId = s.id;
+          saveServers();
+          fillServerInputs();
+          renderServerUI();
+          await onServerChanged();
+        };
+        chips.appendChild(div);
+      });
+
+      fillServerInputs();
+      const s = currentServer();
+      $("#infoServerName").textContent = s?.name || "-";
+      $("#infoServerUrl").textContent = s?.url || "-";
+      renderTopStatus();
+    }
+
+    async function rpcCall(method, params = []) {
+      const s = currentServer();
+      if (!s) throw new Error("请先配置服务器");
+      const realParams = params.slice();
+      if (s.secret) realParams.unshift("token:" + s.secret);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+
+      try {
+        const res = await fetch(s.url, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "aria2-ui",
+            method,
+            params: realParams
+          }),
+          signal: controller.signal
+        });
+
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+        return data.result;
+      } catch (e) {
+        if (e.name === "AbortError") throw new Error("请求超时");
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    function formatBytes(bytes) {
+      const n = Number(bytes || 0);
+      if (!n) return "0 B";
+      const units = ["B","KB","MB","GB","TB"];
+      let i = 0, v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
+    }
+
+    function taskName(t) {
+      return t.bittorrent?.info?.name || t.files?.[0]?.path?.split("/").pop() || t.gid;
+    }
+
+    function statusCls(s) {
+      if (s === "paused") return "paused";
+      if (s === "error" || s === "removed") return "error";
+      if (s === "complete") return "complete";
+      if (s === "active") return "active";
+      return "waiting";
+    }
+
+    function taskCategory(t) {
+      if (t.status === "active") return "active";
+      if (t.status === "paused") return "paused";
+      if (t.status === "waiting") return "waiting";
+      if (t.status === "complete") return "complete";
+      if (t.status === "error" || t.status === "removed") return "error";
+      return "all";
+    }
+
+    function normalizeTaskStatusLabel(status) {
+      if (status === "removed") return "removed";
+      return status;
+    }
+
+    async function fetchServerState() {
+      const [version, opt, stat] = await Promise.all([
+        rpcCall("aria2.getVersion", []),
+        rpcCall("aria2.getGlobalOption", []),
+        rpcCall("aria2.getGlobalStat", [])
+      ]);
+      state.aria2Version = version?.version || "";
+      state.globalOption = opt || {};
+      state.globalStat = stat || {};
+      renderServerInfo();
+      renderConfig();
+      renderTopStatus();
+    }
+
+    function renderServerInfo() {
+      $("#infoVersion").textContent = state.aria2Version || "-";
+      $("#infoDir").textContent = state.globalOption.dir || "-";
+      $("#infoDownloadSpeed").textContent = `${formatBytes(state.globalStat.downloadSpeed || 0)}/s`;
+      $("#infoUploadSpeed").textContent = `${formatBytes(state.globalStat.uploadSpeed || 0)}/s`;
+      $("#infoNumActive").textContent = state.globalStat.numActive || "0";
+      $("#infoNumWaiting").textContent = state.globalStat.numWaiting || "0";
+    }
+
+    function renderConfig() {
+      const o = state.globalOption || {};
+
+      $("#cfg_dir").value = o.dir || "";
+      $("#cfg_user_agent").value = o["user-agent"] || "";
+      $("#cfg_mcd").value = o["max-concurrent-downloads"] || "";
+      $("#cfg_continue").value = o["continue"] || "";
+      $("#cfg_check_integrity").value = o["check-integrity"] || "";
+      $("#cfg_disk_cache").value = o["disk-cache"] || "";
+
+      $("#cfg_mcps").value = o["max-connection-per-server"] || "";
+      $("#cfg_split").value = o.split || "";
+      $("#cfg_mss").value = o["min-split-size"] || "";
+      $("#cfg_lsl").value = o["lowest-speed-limit"] || "";
+      $("#cfg_all_proxy").value = o["all-proxy"] || "";
+      $("#cfg_http_proxy").value = o["http-proxy"] || "";
+      $("#cfg_https_proxy").value = o["https-proxy"] || "";
+      $("#cfg_ftp_pasv").value = o["ftp-pasv"] || "";
+
+      $("#cfg_seed_time").value = o["seed-time"] || "";
+      $("#cfg_seed_ratio").value = o["seed-ratio"] || "";
+      $("#cfg_bt_max_peers").value = o["bt-max-peers"] || "";
+      $("#cfg_bt_rpsl").value = o["bt-request-peer-speed-limit"] || "";
+      $("#cfg_bt_save_metadata").value = o["bt-save-metadata"] || "";
+      $("#cfg_bt_enable_lpd").value = o["bt-enable-lpd"] || "";
+      $("#cfg_enable_dht").value = o["enable-dht"] || "";
+      $("#cfg_enable_dht6").value = o["enable-dht6"] || "";
+      $("#cfg_enable_peer_exchange").value = o["enable-peer-exchange"] || "";
+      $("#cfg_follow_torrent").value = o["follow-torrent"] || "";
+      $("#cfg_bt_tracker").value = o["bt-tracker"] || "";
+      $("#cfg_max_download_result").value = o["max-download-result"] || "";
+
+      $("#cfg_rpc_listen_port").value = o["rpc-listen-port"] || "";
+      $("#cfg_rpc_allow_origin_all").value = o["rpc-allow-origin-all"] || "";
+      $("#cfg_rpc_secure").value = o["rpc-secure"] || "";
+      $("#cfg_rpc_save_upload_metadata").value = o["rpc-save-upload-metadata"] || "";
+      $("#cfg_modl").value = o["max-overall-download-limit"] || "";
+      $("#cfg_moul").value = o["max-overall-upload-limit"] || "";
+      $("#cfg_file_allocation").value = o["file-allocation"] || "";
+      $("#cfg_disable_ipv6").value = o["disable-ipv6"] || "";
+
+      $("#configSummary").textContent = `当前下载目录：${o.dir || "-"} ｜ 并发：${o["max-concurrent-downloads"] || "-"}`;
+    }
+
+    async function saveConfig() {
+      const obj = {
+        "dir": $("#cfg_dir").value.trim(),
+        "user-agent": $("#cfg_user_agent").value.trim(),
+        "max-concurrent-downloads": $("#cfg_mcd").value.trim(),
+        "continue": normalizeBoolText($("#cfg_continue").value.trim()),
+        "check-integrity": normalizeBoolText($("#cfg_check_integrity").value.trim()),
+        "disk-cache": $("#cfg_disk_cache").value.trim(),
+
+        "max-connection-per-server": $("#cfg_mcps").value.trim(),
+        "split": $("#cfg_split").value.trim(),
+        "min-split-size": $("#cfg_mss").value.trim(),
+        "lowest-speed-limit": $("#cfg_lsl").value.trim(),
+        "all-proxy": $("#cfg_all_proxy").value.trim(),
+        "http-proxy": $("#cfg_http_proxy").value.trim(),
+        "https-proxy": $("#cfg_https_proxy").value.trim(),
+        "ftp-pasv": normalizeBoolText($("#cfg_ftp_pasv").value.trim()),
+
+        "seed-time": $("#cfg_seed_time").value.trim(),
+        "seed-ratio": $("#cfg_seed_ratio").value.trim(),
+        "bt-max-peers": $("#cfg_bt_max_peers").value.trim(),
+        "bt-request-peer-speed-limit": $("#cfg_bt_rpsl").value.trim(),
+        "bt-save-metadata": normalizeBoolText($("#cfg_bt_save_metadata").value.trim()),
+        "bt-enable-lpd": normalizeBoolText($("#cfg_bt_enable_lpd").value.trim()),
+        "enable-dht": normalizeBoolText($("#cfg_enable_dht").value.trim()),
+        "enable-dht6": normalizeBoolText($("#cfg_enable_dht6").value.trim()),
+        "enable-peer-exchange": normalizeBoolText($("#cfg_enable_peer_exchange").value.trim()),
+        "follow-torrent": normalizeBoolText($("#cfg_follow_torrent").value.trim()),
+        "bt-tracker": $("#cfg_bt_tracker").value.trim().replace(/\n+/g, ","),
+        "max-download-result": $("#cfg_max_download_result").value.trim(),
+
+        "rpc-listen-port": $("#cfg_rpc_listen_port").value.trim(),
+        "rpc-allow-origin-all": normalizeBoolText($("#cfg_rpc_allow_origin_all").value.trim()),
+        "rpc-secure": normalizeBoolText($("#cfg_rpc_secure").value.trim()),
+        "rpc-save-upload-metadata": normalizeBoolText($("#cfg_rpc_save_upload_metadata").value.trim()),
+        "max-overall-download-limit": $("#cfg_modl").value.trim(),
+        "max-overall-upload-limit": $("#cfg_moul").value.trim(),
+        "file-allocation": $("#cfg_file_allocation").value.trim(),
+        "disable-ipv6": normalizeBoolText($("#cfg_disable_ipv6").value.trim())
+      };
+
+      Object.keys(obj).forEach(k => {
+        if (obj[k] === "") delete obj[k];
+      });
+
+      await rpcCall("aria2.changeGlobalOption", [obj]);
+      await fetchServerState();
+      alert("已保存到 aria2 当前运行配置");
+    }
+
+    async function loadTasks() {
+      const fields = ["gid","status","bittorrent","files","totalLength","completedLength","downloadSpeed","uploadSpeed"];
+      const [active, waiting, stopped] = await Promise.all([
+        rpcCall("aria2.tellActive", [fields]),
+        rpcCall("aria2.tellWaiting", [0, 1000, fields]),
+        rpcCall("aria2.tellStopped", [0, 1000, fields])
+      ]);
+
+      const list = [...active, ...waiting, ...stopped].filter(t => (t.files?.length || 0) > 1 || !!t.bittorrent);
+      state.tasks = list;
+
+      if (state.selectedTask) {
+        const latest = state.tasks.find(x => x.gid === state.selectedTask.gid);
+        if (latest) state.selectedTask = latest;
+      }
+
+      cleanupTaskOpsSelection();
+      renderTaskCategoryMenu();
+      renderTasks();
+    }
+
+    function cleanupTaskOpsSelection() {
+      const gids = new Set(state.tasks.map(t => t.gid));
+      state.selectedTaskOps = new Set([...state.selectedTaskOps].filter(gid => gids.has(gid)));
+    }
+
+    function renderTaskCategoryMenu() {
+      const counts = {
+        active: 0,
+        waiting: 0,
+        paused: 0,
+        complete: 0,
+        error: 0,
+        all: state.tasks.length
+      };
+
+      state.tasks.forEach(t => {
+        const c = taskCategory(t);
+        if (counts[c] != null) counts[c]++;
+      });
+
+      $("#count_active").textContent = counts.active;
+      $("#count_waiting").textContent = counts.waiting;
+      $("#count_paused").textContent = counts.paused;
+      $("#count_complete").textContent = counts.complete;
+      $("#count_error").textContent = counts.error;
+      $("#count_all").textContent = counts.all;
+
+      $$(".menu-item[data-category]").forEach(el => {
+        el.classList.toggle("active", el.dataset.category === state.currentTaskCategory);
+      });
+    }
+
+    function getFilteredTasks() {
+      const q = $("#taskSearch").value.trim().toLowerCase();
+      return state.tasks.filter(t => {
+        const name = taskName(t).toLowerCase();
+        if (q && !name.includes(q)) return false;
+        if (state.currentTaskCategory !== "all" && taskCategory(t) !== state.currentTaskCategory) return false;
+        return true;
+      });
+    }
+
+    function renderTasks() {
+      const wrap = $("#taskList");
+      wrap.innerHTML = "";
+
+      const list = getFilteredTasks();
+      $("#taskListSummary").textContent = `当前分类 ${state.currentTaskCategory} ｜ 显示 ${list.length} 个任务 ｜ 已勾选 ${state.selectedTaskOps.size} 个`;
+
+      if (!list.length) {
+        wrap.innerHTML = `<div class="muted">没有符合条件的 BT 任务</div>`;
+        updateTaskToolbarState();
+        return;
+      }
+
+      list.forEach(t => {
+        const div = document.createElement("div");
+        div.className = "task"
+          + (state.selectedTask?.gid === t.gid ? " active" : "")
+          + (state.selectedTaskOps.has(t.gid) ? " selected-op" : "");
+
+        div.innerHTML = `
+          <div class="task-top">
+            <input type="checkbox" class="task-op-check" ${state.selectedTaskOps.has(t.gid) ? "checked" : ""}>
+            <div style="min-width:0;flex:1">
+              <div class="task-title">${escapeHtml(taskName(t))}</div>
+              <div class="task-meta">
+                <span class="status ${statusCls(t.status)}">${escapeHtml(normalizeTaskStatusLabel(t.status))}</span>
+                <span>GID: ${escapeHtml(t.gid)}</span>
+                <span>文件数: ${t.files?.length || 0}</span>
+                <span>进度: ${formatBytes(t.completedLength)} / ${formatBytes(t.totalLength)}</span>
+                <span>↓ ${formatBytes(t.downloadSpeed || 0)}/s</span>
+                <span>↑ ${formatBytes(t.uploadSpeed || 0)}/s</span>
+              </div>
+            </div>
+          </div>
+        `;
+
+        const checkbox = div.querySelector(".task-op-check");
+        checkbox.onclick = e => e.stopPropagation();
+        checkbox.onchange = () => {
+          if (checkbox.checked) state.selectedTaskOps.add(t.gid);
+          else state.selectedTaskOps.delete(t.gid);
+          renderTasks();
+        };
+
+        div.onclick = async () => {
+          state.selectedTask = t;
+          state.currentPath = [];
+          await loadTaskFiles(t.gid);
+          renderTasks();
+          if (isMobile()) {
+            enterTaskDetailMode();
+          } else {
+            document.getElementById("treeCard")?.scrollIntoView({behavior:"smooth", block:"start"});
+          }
+        };
+
+        wrap.appendChild(div);
+      });
+
+      updateTaskToolbarState();
+    }
+
+    function updateTaskToolbarState() {
+      const hasSelectedOps = state.selectedTaskOps.size > 0;
+      $("#btnPauseSelected").disabled = !hasSelectedOps;
+      $("#btnResumeSelected").disabled = !hasSelectedOps;
+      $("#btnRemoveSelected").disabled = !hasSelectedOps;
+    }
+
+    function normalizePath(path) {
+      return (path || "").replaceAll("\\","/");
+    }
+
+    function splitRelativePath(path, rootName) {
+      path = normalizePath(path);
+      const arr = path.split("/").filter(Boolean);
+      if (arr.length && arr[0] === rootName) arr.shift();
+      return arr;
+    }
+
+    function isVideoFile(name) {
+      const ext = (name.split(".").pop() || "").toLowerCase();
+      return VIDEO_EXTS.includes(ext);
+    }
+
+    function getFileExt(name = "") {
+      const arr = String(name).split(".");
+      if (arr.length < 2) return "";
+      return arr.pop().toLowerCase();
+    }
+
+    function extFilterMatched(name) {
+      const raw = state.fileExtFilter.trim().toLowerCase();
+      if (!raw) return true;
+      const allow = raw.split(",").map(x => x.trim().replace(/^\./, "")).filter(Boolean);
+      if (!allow.length) return true;
+      return allow.includes(getFileExt(name));
+    }
+
+    function fileMatchedByFilter(name) {
+      if (state.fileFilter === "all") return true;
+      if (state.fileFilter === "video") return isVideoFile(name);
+      if (state.fileFilter === "ext") return extFilterMatched(name);
+      return true;
+    }
+
+    function buildTree(task) {
+      const rootName = taskName(task);
+      const root = {
+        type: "folder",
+        name: rootName,
+        pathKey: "",
+        parent: null,
+        children: [],
+        childrenMap: new Map(),
+        expanded: true
+      };
+
+      task.files.forEach((f, idx) => {
+        const relParts = splitRelativePath(f.path || "", rootName);
+        let cur = root;
+
+        if (!relParts.length) {
+          cur.children.push({
+            type: "file",
+            name: f.path?.split("/").pop() || `file_${idx+1}`,
+            pathKey: `file_${idx+1}`,
+            parent: cur,
+            index: Number(f.index || idx + 1),
+            length: Number(f.length || 0),
+            completedLength: Number(f.completedLength || 0),
+            selected: String(f.selected ?? "true") === "true",
+            originalOrder: idx + 1,
+            raw: f
+          });
+          return;
+        }
+
+        for (let i = 0; i < relParts.length; i++) {
+          const part = relParts[i];
+          const isLast = i === relParts.length - 1;
+          const key = (cur.pathKey ? cur.pathKey + "/" : "") + part;
+
+          if (isLast) {
+            cur.children.push({
+              type: "file",
+              name: part,
+              pathKey: key,
+              parent: cur,
+              index: Number(f.index || idx + 1),
+              length: Number(f.length || 0),
+              completedLength: Number(f.completedLength || 0),
+              selected: String(f.selected ?? "true") === "true",
+              originalOrder: idx + 1,
+              raw: f
+            });
+          } else {
+            let child = cur.childrenMap.get(part);
+            if (!child) {
+              child = {
+                type: "folder",
+                name: part,
+                pathKey: key,
+                parent: cur,
+                children: [],
+                childrenMap: new Map(),
+                expanded: false
+              };
+              cur.childrenMap.set(part, child);
+              cur.children.push(child);
+            }
+            cur = child;
+          }
+        }
+      });
+
+      computeFolderState(root);
+      return root;
+    }
+
+    function computeFolderState(node) {
+      if (node.type === "file") return node.selected ? "checked" : "unchecked";
+      const states = node.children.map(computeFolderState);
+      if (!states.length) node.checkState = "unchecked";
+      else if (states.every(s => s === "checked")) node.checkState = "checked";
+      else if (states.every(s => s === "unchecked")) node.checkState = "unchecked";
+      else node.checkState = "partial";
+      return node.checkState;
+    }
+
+    function walkFiles(node, cb) {
+      if (node.type === "file") return cb(node);
+      node.children.forEach(c => walkFiles(c, cb));
+    }
+
+    function folderSize(node) {
+      let sum = 0;
+      walkFiles(node, f => sum += Number(f.length || 0));
+      return sum;
+    }
+
+    function firstFileOrder(node) {
+      let min = Infinity;
+      walkFiles(node, f => min = Math.min(min, f.originalOrder));
+      return Number.isFinite(min) ? min : 999999999;
+    }
+
+    function visibleChildren(folder) {
+      let arr = folder.children.slice();
+
+      arr = arr.filter(n => {
+        if (state.fileFilter === "all") return true;
+        if (n.type === "folder") {
+          let found = false;
+          walkFiles(n, f => { if (fileMatchedByFilter(f.name)) found = true; });
+          return found;
+        }
+        return fileMatchedByFilter(n.name);
+      });
+
+      if (state.sortMode === "name") {
+        arr.sort((a,b) => {
+          if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+          return a.name.localeCompare(b.name, "zh-CN", {numeric:true, sensitivity:"base"});
+        });
+      } else if (state.sortMode === "size") {
+        arr.sort((a,b) => {
+          if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+          const sa = a.type === "folder" ? folderSize(a) : a.length;
+          const sb = b.type === "folder" ? folderSize(b) : b.length;
+          return sb - sa || a.name.localeCompare(b.name, "zh-CN", {numeric:true, sensitivity:"base"});
+        });
+      } else {
+        arr.sort((a,b) => {
+          if (a.type !== b.type) return a.type === "folder" ? -1 : 1;
+          const oa = a.type === "folder" ? firstFileOrder(a) : a.originalOrder;
+          const ob = b.type === "folder" ? firstFileOrder(b) : b.originalOrder;
+          return oa - ob;
+        });
+      }
+      return arr;
+    }
+
+    function updateParentStates(node) {
+      while (node) {
+        computeFolderState(node);
+        node = node.parent;
+      }
+    }
+
+    function setNodeSelected(node, selected) {
+      if (node.type === "file") {
+        node.selected = selected;
+      } else {
+        node.children.forEach(c => setNodeSelected(c, selected));
+      }
+      computeFolderState(state.treeRoot);
+    }
+
+    function getNodeByPath(pathArr) {
+      let cur = state.treeRoot;
+      for (const name of pathArr) {
+        cur = cur.children.find(x => x.type === "folder" && x.name === name);
+        if (!cur) return null;
+      }
+      return cur;
+    }
+
+    function currentFolderNode() {
+      return getNodeByPath(state.currentPath) || state.treeRoot;
+    }
+
+    function selectedCount(root) {
+      let total = 0, checked = 0;
+      walkFiles(root, f => {
+        total++;
+        if (f.selected) checked++;
+      });
+      return {checked, total};
+    }
+
+    function currentFolderFiles(folder) {
+      let list = [];
+      walkFiles(folder, f => list.push(f));
+      list = list.filter(f => fileMatchedByFilter(f.name));
+      return list;
+    }
+
+    function parseSelectionExpr(expr, maxIndex) {
+      expr = (expr || "").trim().replace(/\s+/g, "");
+      if (!expr) return null;
+
+      let invert = false;
+      if (expr.startsWith("!")) {
+        invert = true;
+        expr = expr.slice(1);
+      }
+
+      let set = new Set();
+
+      const addRange = (a,b) => {
+        a = Number(a); b = Number(b);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return;
+        if (a > b) [a,b] = [b,a];
+        for (let i=a;i<=b;i++) set.add(i);
+      };
+
+      if (/^>\d+$/.test(expr)) {
+        const n = Number(expr.slice(1));
+        for (let i=n+1;i<=maxIndex;i++) set.add(i);
+      } else if (/^<\d+$/.test(expr)) {
+        const n = Number(expr.slice(1));
+        for (let i=1;i<n;i++) set.add(i);
+      } else if (/^\d+-\d+$/.test(expr)) {
+        const [a,b] = expr.split("-");
+        addRange(a,b);
+      } else if (/^\d+\+\d+$/.test(expr)) {
+        const [a,b] = expr.split("+").map(Number);
+        addRange(a, a+b-1);
+      } else if (/^\d+$/.test(expr)) {
+        set.add(Number(expr));
+      } else {
+        return null;
+      }
+
+      return {invert, set};
+    }
+
+    function applyExpr() {
+      if (!state.treeRoot) return alert("请先选择一个 BT 任务");
+      const expr = $("#exprInput").value;
+      const scope = $("#exprScope").value;
+      const folder = scope === "current" ? currentFolderNode() : state.treeRoot;
+      const files = currentFolderFiles(folder).sort((a,b) => a.index - b.index);
+
+      if (!files.length) return alert("当前范围没有可操作文件");
+
+      const maxIndex = Math.max(...files.map(f => f.index));
+      const parsed = parseSelectionExpr(expr, maxIndex);
+      if (!parsed) return alert("表达式格式无效，支持：>10 / <20 / 10-20 / 10+5 / !1-5");
+
+      files.forEach(f => {
+        const hit = parsed.set.has(f.index);
+        f.selected = parsed.invert ? !hit : hit;
+      });
+
+      computeFolderState(state.treeRoot);
+      renderTree();
+    }
+
+    async function loadTaskFiles(gid) {
+      const files = await rpcCall("aria2.getFiles", [gid]);
+      const task = state.tasks.find(t => t.gid === gid);
+      if (!task) return;
+      task.files = files || [];
+      state.selectedTask = task;
+      state.treeRoot = buildTree(task);
+      renderTree();
+      renderTasks();
+    }
+
+    function renderPathBar() {
+      const bar = $("#pathBar");
+      bar.innerHTML = "";
+
+      if (!state.treeRoot) return;
+
+      const rootBtn = document.createElement("div");
+      rootBtn.className = "crumb";
+      rootBtn.textContent = state.treeRoot.name || "/";
+      rootBtn.onclick = () => {
+        state.currentPath = [];
+        renderTree();
+      };
+      bar.appendChild(rootBtn);
+
+      state.currentPath.forEach((seg, idx) => {
+        const btn = document.createElement("div");
+        btn.className = "crumb";
+        btn.textContent = seg;
+        btn.onclick = () => {
+          state.currentPath = state.currentPath.slice(0, idx + 1);
+          renderTree();
+        };
+        bar.appendChild(btn);
+      });
+    }
+
+    function renderNode(node) {
+      const wrap = document.createElement("div");
+      wrap.className = "node";
+
+      const row = document.createElement("div");
+      row.className = "node-row";
+
+      if (node.type === "folder" && getNodeByPath(state.currentPath) === node) {
+        row.classList.add("is-dir-current");
+      }
+
+      const toggle = document.createElement("button");
+      toggle.className = "toggle" + (node.type === "file" ? " empty" : "");
+      toggle.textContent = node.type === "folder" ? (node.expanded ? "▾" : "▸") : "";
+      if (node.type === "folder") {
+        toggle.onclick = (e) => {
+          e.stopPropagation();
+          node.expanded = !node.expanded;
+          renderTree();
+        };
+      }
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "check";
+      if (node.type === "file") {
+        checkbox.checked = !!node.selected;
+      } else {
+        checkbox.checked = node.checkState === "checked";
+        checkbox.indeterminate = node.checkState === "partial";
+      }
+      checkbox.onclick = e => e.stopPropagation();
+      checkbox.onchange = () => {
+        if (node.type === "file") {
+          node.selected = checkbox.checked;
+          updateParentStates(node.parent);
+        } else {
+          setNodeSelected(node, checkbox.checked);
+        }
+        renderTree();
+      };
+
+      const name = document.createElement("div");
+      name.className = "name";
+      name.innerHTML = `
+        <span class="${node.type === "folder" ? "folder" : "file"}">${node.type === "folder" ? "📁" : "📄"}</span>
+        <span class="txt">${escapeHtml(node.name)}</span>
+      `;
+      name.onclick = () => {
+        if (node.type === "folder") {
+          state.currentPath = buildPathArray(node);
+          node.expanded = true;
+          renderTree();
+        }
+      };
+
+      const info = document.createElement("div");
+      info.className = "muted small";
+      info.textContent = node.type === "folder"
+        ? `${selectedCount(node).checked}/${selectedCount(node).total}`
+        : `#${node.index}`;
+
+      const size = document.createElement("div");
+      size.className = "muted small";
+      size.textContent = node.type === "folder" ? formatBytes(folderSize(node)) : formatBytes(node.length);
+
+      row.append(toggle, checkbox, name, info, size);
+      wrap.appendChild(row);
+
+      if (node.type === "folder" && node.expanded) {
+        const kids = visibleChildren(node);
+        if (kids.length) {
+          const childWrap = document.createElement("div");
+          childWrap.className = "node-children";
+          kids.forEach(child => childWrap.appendChild(renderNode(child)));
+          wrap.appendChild(childWrap);
+        }
+      }
+
+      return wrap;
+    }
+
+    function buildPathArray(node) {
+      const arr = [];
+      let cur = node;
+      while (cur && cur.parent) {
+        arr.unshift(cur.name);
+        cur = cur.parent;
+      }
+      return arr;
+    }
+
+    function renderTree() {
+      const tree = $("#tree");
+      const title = $("#taskTitleBadge");
+      const dirBadge = $("#dirBadge");
+      const countBadge = $("#countBadge");
+      const summary = $("#summaryText");
+
+      renderPathBar();
+
+      if (!state.treeRoot || !state.selectedTask) {
+        tree.innerHTML = `<div class="muted">请先选择一个 BT 任务</div>`;
+        title.textContent = "未选择任务";
+        dirBadge.textContent = "目录：/";
+        countBadge.textContent = "选中 0 / 0";
+        summary.textContent = "未选择任务";
+        updateFloatingSave();
+        return;
+      }
+
+      title.textContent = taskName(state.selectedTask);
+      dirBadge.textContent = "目录：/" + buildPathArray(currentFolderNode()).join("/");
+      const cnt = selectedCount(state.treeRoot);
+      countBadge.textContent = `选中 ${cnt.checked} / ${cnt.total}`;
+      summary.textContent = `任务：${taskName(state.selectedTask)} ｜ 已选 ${cnt.checked} / ${cnt.total}`;
+
+      tree.innerHTML = "";
+      tree.appendChild(renderNode(state.treeRoot));
+      updateFloatingSave();
+    }
+
+    async function saveSelectionToAria2() {
+      if (!state.selectedTask || !state.treeRoot) return alert("请先选择任务");
+      const selectedIndexes = [];
+      walkFiles(state.treeRoot, f => {
+        if (f.selected) selectedIndexes.push(f.index);
+      });
+      const val = selectedIndexes.sort((a,b)=>a-b).join(",");
+      if (!val && !confirm("当前没有选中任何文件，是否仍然保存？")) return;
+      await rpcCall("aria2.changeOption", [state.selectedTask.gid, {"select-file": val}]);
+      alert("已保存到 aria2");
+      await loadTasks();
+      await loadTaskFiles(state.selectedTask.gid);
+    }
+
+    function saveCurrentServer() {
+      const name = $("#serverName").value.trim();
+      const url = $("#rpcUrl").value.trim();
+      const secret = $("#rpcSecret").value.trim();
+      if (!name || !url) return alert("服务器名称和 RPC 地址不能为空");
+
+      const selectId = $("#serverSelect").value;
+      let s = state.servers.find(x => x.id === selectId);
+
+      if (s) {
+        s.name = name;
+        s.url = url;
+        s.secret = secret;
+        state.currentServerId = s.id;
+      } else {
+        s = {id: uid(), name, url, secret};
+        state.servers.push(s);
+        state.currentServerId = s.id;
+      }
+      saveServers();
+      renderServerUI();
+      alert("已保存服务器");
+    }
+
+    function deleteCurrentServer() {
+      const s = currentServer();
+      if (!s) return alert("没有可删除的服务器");
+      if (!confirm(`确认删除服务器：${s.name} ?`)) return;
+      state.servers = state.servers.filter(x => x.id !== s.id);
+      state.currentServerId = state.servers[0]?.id || null;
+      saveServers();
+      renderServerUI();
+    }
+
+    async function testConnect() {
+      try {
+        state.connectionStatus = "checking";
+        renderTopStatus();
+        await fetchServerState();
+        state.connectionStatus = "online";
+        renderTopStatus();
+        alert("连接成功");
+      } catch (e) {
+        state.connectionStatus = "offline";
+        renderTopStatus();
+        alert("连接失败: " + e.message);
+      }
+    }
+
+    async function heartbeatCheck(silent = true) {
+      try {
+        state.connectionStatus = "checking";
+        renderTopStatus();
+        const [ver, stat] = await Promise.all([
+          rpcCall("aria2.getVersion", []),
+          rpcCall("aria2.getGlobalStat", [])
+        ]);
+        state.aria2Version = ver?.version || state.aria2Version;
+        state.globalStat = stat || {};
+        state.connectionStatus = "online";
+        renderServerInfo();
+      } catch (e) {
+        state.connectionStatus = "offline";
+        state.globalStat = {};
+        renderServerInfo();
+        if (!silent) alert("服务器连接失败: " + e.message);
+      }
+      renderTopStatus();
+    }
+
+    function stopHeartbeat() {
+      if (state.heartbeatTimer) {
+        clearInterval(state.heartbeatTimer);
+        state.heartbeatTimer = null;
+      }
+    }
+
+    function startHeartbeat() {
+      stopHeartbeat();
+      heartbeatCheck(true);
+      state.heartbeatTimer = setInterval(() => heartbeatCheck(true), HEARTBEAT_INTERVAL);
+    }
+
+    async function onServerChanged() {
+      state.tasks = [];
+      state.selectedTask = null;
+      state.selectedTaskOps = new Set();
+      state.treeRoot = null;
+      state.currentPath = [];
+      state.connectionStatus = "checking";
+      renderTaskCategoryMenu();
+      renderTasks();
+      renderTree();
+      renderTopStatus();
+
+      try {
+        await fetchServerState();
+        state.connectionStatus = "online";
+        renderTopStatus();
+        await loadTasks();
+      } catch (e) {
+        console.error(e);
+        state.connectionStatus = "offline";
+        renderTopStatus();
+        alert("加载服务器数据失败: " + e.message);
+      }
+
+      startHeartbeat();
+    }
+
+    function setActivePage(pageId) {
+      state.currentPage = pageId;
+      $$(".page").forEach(x => x.classList.remove("active"));
+      $("#" + pageId)?.classList.add("active");
+
+      $$(".nav-item[data-page]").forEach(x => {
+        x.classList.toggle("active", x.dataset.page === pageId);
+      });
+
+      const isTaskPage = pageId === "page-tasks";
+      $("#sidebarTaskSection").style.display = isTaskPage ? "" : "none";
+      $("#sidebarBatchSection").style.display = isTaskPage ? "" : "none";
+
+      if (isMobile()) closeSidebar();
+    }
+
+    function expandAll(node, val) {
+      if (node.type === "folder") {
+        node.expanded = val;
+        node.children.forEach(c => expandAll(c, val));
+      }
+    }
+
+    function enterTaskDetailMode() {
+      if (!isMobile()) return;
+      state.isMobileDetailMode = true;
+      $("#treeCard").classList.add("detail-mobile-fullscreen");
+      $("#btnBackFromDetail").style.display = "inline-block";
+      document.body.style.overflow = "hidden";
+      updateFloatingSave();
+    }
+
+    function exitTaskDetailMode() {
+      state.isMobileDetailMode = false;
+      $("#treeCard").classList.remove("detail-mobile-fullscreen");
+      $("#btnBackFromDetail").style.display = "none";
+      document.body.style.overflow = state.sidebarOpen ? "hidden" : "";
+      updateFloatingSave();
+    }
+
+    function updateFloatingSave() {
+      const btn = $("#btnFloatingSave");
+      if (isMobile() && state.isMobileDetailMode && state.treeRoot && state.selectedTask) {
+        btn.classList.add("show");
+      } else {
+        btn.classList.remove("show");
+      }
+    }
+
+    function openModal(id) {
+      $("#" + id).classList.add("show");
+    }
+
+    function closeModal(id) {
+      $("#" + id).classList.remove("show");
+    }
+
+    function openSidebar() {
+      if (!isMobile()) return;
+      state.sidebarOpen = true;
+      $("#appSidebar").classList.add("open");
+      $("#sidebarOverlay").classList.add("show");
+      document.body.style.overflow = "hidden";
+    }
+
+    function closeSidebar() {
+      state.sidebarOpen = false;
+      $("#appSidebar").classList.remove("open");
+      $("#sidebarOverlay").classList.remove("show");
+      document.body.style.overflow = state.isMobileDetailMode ? "hidden" : "";
+    }
+
+    function toggleSidebar() {
+      if (state.sidebarOpen) closeSidebar();
+      else openSidebar();
+    }
+
+    async function addUris() {
+      const lines = $("#addUriInput").value.split("\n").map(x => x.trim()).filter(Boolean);
+      if (!lines.length) return alert("请至少输入一个下载链接");
+
+      const opt = {};
+      if ($("#addUriDir").value.trim()) opt.dir = $("#addUriDir").value.trim();
+      if ($("#addUriOut").value.trim()) opt.out = $("#addUriOut").value.trim();
+
+      for (const url of lines) {
+        await rpcCall("aria2.addUri", [[url], opt]);
+      }
+
+      closeModal("addUriModal");
+      $("#addUriInput").value = "";
+      $("#addUriDir").value = "";
+      $("#addUriOut").value = "";
+      alert("已提交下载任务");
+      await loadTasks();
+    }
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const base64 = result.includes(",") ? result.split(",")[1] : result;
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    async function addTorrent() {
+      const file = $("#torrentFileInput").files?.[0];
+      if (!file) return alert("请先选择一个 torrent 文件");
+
+      const opt = {};
+      if ($("#addTorrentDir").value.trim()) opt.dir = $("#addTorrentDir").value.trim();
+
+      const base64 = await fileToBase64(file);
+      await rpcCall("aria2.addTorrent", [base64, [], opt]);
+
+      closeModal("addTorrentModal");
+      $("#torrentFileInput").value = "";
+      $("#addTorrentDir").value = "";
+      alert("Torrent 已上传并创建任务");
+      await loadTasks();
+    }
+
+    async function batchPauseSelected() {
+      const gids = [...state.selectedTaskOps];
+      if (!gids.length) return alert("请先勾选任务");
+      for (const gid of gids) {
+        try { await rpcCall("aria2.pause", [gid]); } catch {}
+      }
+      await loadTasks();
+      alert("已暂停选中任务");
+    }
+
+    async function batchResumeSelected() {
+      const gids = [...state.selectedTaskOps];
+      if (!gids.length) return alert("请先勾选任务");
+      for (const gid of gids) {
+        try { await rpcCall("aria2.unpause", [gid]); } catch {}
+      }
+      await loadTasks();
+      alert("已恢复选中任务");
+    }
+
+    async function batchRemoveSelected() {
+      const gids = [...state.selectedTaskOps];
+      if (!gids.length) return alert("请先勾选任务");
+      if (!confirm(`确认删除选中的 ${gids.length} 个任务？`)) return;
+
+      for (const gid of gids) {
+        const task = state.tasks.find(t => t.gid === gid);
+        try {
+          if (task?.status === "active" || task?.status === "waiting" || task?.status === "paused") {
+            await rpcCall("aria2.remove", [gid]);
+          } else {
+            await rpcCall("aria2.removeDownloadResult", [gid]);
+          }
+        } catch {}
+      }
+
+      state.selectedTaskOps.clear();
+
+      if (state.selectedTask && gids.includes(state.selectedTask.gid)) {
+        state.selectedTask = null;
+        state.treeRoot = null;
+        state.currentPath = [];
+        renderTree();
+      }
+
+      await loadTasks();
+      alert("已删除选中任务");
+    }
+
+    function selectAllVisibleTasks() {
+      getFilteredTasks().forEach(t => state.selectedTaskOps.add(t.gid));
+      renderTasks();
+      if (isMobile()) closeSidebar();
+    }
+
+    function clearSelectedTasks() {
+      state.selectedTaskOps.clear();
+      renderTasks();
+      if (isMobile()) closeSidebar();
+    }
+
+    function bindEvents() {
+      $("#btnMobileMenu").onclick = toggleSidebar;
+      $("#sidebarOverlay").onclick = closeSidebar;
+
+      $$(".nav-item[data-page]").forEach(btn => {
+        btn.onclick = () => setActivePage(btn.dataset.page);
+      });
+
+      $("#btnSaveServer").onclick = saveCurrentServer;
+      $("#btnDeleteServer").onclick = deleteCurrentServer;
+      $("#btnConnect").onclick = testConnect;
+      $("#btnReloadServerState").onclick = onServerChanged;
+
+      $("#serverSelect").onchange = async () => {
+        state.currentServerId = $("#serverSelect").value || null;
+        saveServers();
+        fillServerInputs();
+        renderServerUI();
+        await onServerChanged();
+      };
+
+      $$(".menu-item[data-category]").forEach(el => {
+        el.onclick = () => {
+          state.currentTaskCategory = el.dataset.category;
+          renderTaskCategoryMenu();
+          renderTasks();
+          if (isMobile()) closeSidebar();
+        };
+      });
+
+      $("#btnSelectAllVisibleTasks").onclick = selectAllVisibleTasks;
+      $("#btnClearSelectedTasks").onclick = clearSelectedTasks;
+
+      $("#btnRefreshTasks").onclick = async () => {
+        try {
+          await loadTasks();
+          await heartbeatCheck(true);
+        } catch (e) {
+          alert("刷新任务失败: " + e.message);
+        }
+      };
+
+      $("#taskSearch").oninput = renderTasks;
+
+      $("#sortMode").onchange = () => {
+        state.sortMode = $("#sortMode").value;
+        renderTree();
+      };
+
+      $("#fileFilter").onchange = () => {
+        state.fileFilter = $("#fileFilter").value;
+        renderTree();
+      };
+
+      $("#fileExtFilter").oninput = () => {
+        state.fileExtFilter = $("#fileExtFilter").value.trim();
+        renderTree();
+      };
+
+      $("#btnApplyExpr").onclick = applyExpr;
+
+      $("#btnReloadFiles").onclick = async () => {
+        if (!state.selectedTask) return alert("请先选择任务");
+        await loadTaskFiles(state.selectedTask.gid);
+      };
+
+      $("#btnCurrentSelectAll").onclick = () => {
+        if (!state.treeRoot) return;
+        setNodeSelected(currentFolderNode(), true);
+        renderTree();
+      };
+
+      $("#btnCurrentUnselectAll").onclick = () => {
+        if (!state.treeRoot) return;
+        setNodeSelected(currentFolderNode(), false);
+        renderTree();
+      };
+
+      $("#btnExpandAll").onclick = () => {
+        if (!state.treeRoot) return;
+        expandAll(state.treeRoot, true);
+        renderTree();
+      };
+
+      $("#btnCollapseAll").onclick = () => {
+        if (!state.treeRoot) return;
+        expandAll(state.treeRoot, false);
+        state.treeRoot.expanded = true;
+        renderTree();
+      };
+
+      $("#btnSaveSelection").onclick = async () => {
+        try { await saveSelectionToAria2(); }
+        catch (e) { alert("保存失败: " + e.message); }
+      };
+
+      $("#btnFloatingSave").onclick = async () => {
+        try { await saveSelectionToAria2(); }
+        catch (e) { alert("保存失败: " + e.message); }
+      };
+
+      $("#btnToggleMore").onclick = () => {
+        $("#morePanel").classList.toggle("show");
+      };
+
+      $("#btnBackFromDetail").onclick = () => {
+        exitTaskDetailMode();
+      };
+
+      $("#btnLoadConfig").onclick = async () => {
+        try {
+          await fetchServerState();
+          alert("已重新读取 aria2 配置");
+        } catch (e) {
+          alert("读取配置失败: " + e.message);
+        }
+      };
+
+      $("#btnSaveConfig").onclick = async () => {
+        try { await saveConfig(); }
+        catch (e) { alert("保存配置失败: " + e.message); }
+      };
+
+      $("#btnPauseAll").onclick = async () => {
+        try {
+          await rpcCall("aria2.pauseAll", []);
+          alert("已暂停全部");
+          await loadTasks();
+        } catch (e) {
+          alert("暂停失败: " + e.message);
+        }
+      };
+
+      $("#btnUnpauseAll").onclick = async () => {
+        try {
+          await rpcCall("aria2.unpauseAll", []);
+          alert("已恢复全部");
+          await loadTasks();
+        } catch (e) {
+          alert("恢复失败: " + e.message);
+        }
+      };
+
+      $("#btnOpenAddUri").onclick = () => openModal("addUriModal");
+      $("#btnOpenAddTorrent").onclick = () => openModal("addTorrentModal");
+      $("#btnSubmitAddUri").onclick = async () => {
+        try { await addUris(); }
+        catch (e) { alert("新建 URL 任务失败: " + e.message); }
+      };
+      $("#btnSubmitAddTorrent").onclick = async () => {
+        try { await addTorrent(); }
+        catch (e) { alert("上传 Torrent 失败: " + e.message); }
+      };
+
+      $("#btnPauseSelected").onclick = async () => {
+        try { await batchPauseSelected(); }
+        catch (e) { alert("批量暂停失败: " + e.message); }
+      };
+
+      $("#btnResumeSelected").onclick = async () => {
+        try { await batchResumeSelected(); }
+        catch (e) { alert("批量恢复失败: " + e.message); }
+      };
+
+      $("#btnRemoveSelected").onclick = async () => {
+        try { await batchRemoveSelected(); }
+        catch (e) { alert("批量删除失败: " + e.message); }
+      };
+
+      $$("[data-close-modal]").forEach(btn => {
+        btn.onclick = () => closeModal(btn.dataset.closeModal);
+      });
+
+      $$(".modal").forEach(modal => {
+        modal.onclick = e => {
+          if (e.target === modal) modal.classList.remove("show");
+        };
+      });
+
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) heartbeatCheck(true);
+      });
+
+      window.addEventListener("focus", () => {
+        heartbeatCheck(true);
+      });
+
+      window.addEventListener("resize", () => {
+        if (!isMobile()) {
+          closeSidebar();
+          exitTaskDetailMode();
+          $("#appSidebar").classList.remove("open");
+          $("#sidebarOverlay").classList.remove("show");
+          document.body.style.overflow = "";
+        }
+        updateFloatingSave();
+      });
+    }
+
+    async function init() {
+      loadServers();
+      bindEvents();
+      renderTopStatus();
+      renderTaskCategoryMenu();
+      setActivePage("page-tasks");
+      try {
+        await onServerChanged();
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
