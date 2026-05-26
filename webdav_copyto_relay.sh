@@ -10,18 +10,20 @@ CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/webdav_copyto_relay.conf}"
 STATE_DIR="${STATE_DIR:-$SCRIPT_DIR/.webdav_copyto_relay}"
 PID_FILE="$STATE_DIR/task.pid"
 LOG_FILE="$STATE_DIR/relay.log"
+STATS_FILE="$STATE_DIR/stats.env"
+LIST_FILE="$STATE_DIR/file_list.txt"
 
 ########################################
 # 默认配置
 ########################################
 
-WEBDAV_URL_DEFAULT="http://127.0.0.1:5245/dav"
+WEBDAV_URL_DEFAULT="http://127.0.0.1:5244/dav"
 WEBDAV_USER_DEFAULT="admin"
 WEBDAV_PASS_DEFAULT="root"
 REMOTE_NAME_DEFAULT="webdav_relay_remote"
 
 SRC_PATH_DEFAULT="gy/Hentai"
-DST_PATH_DEFAULT="openlist/downloads"
+DST_PATH_DEFAULT="downloads"
 
 TMP_DIR_DEFAULT="/tmp/webdav_copyto_relay"
 MIN_FREE_PERCENT_DEFAULT="30"
@@ -43,9 +45,20 @@ ensure_state_dir() {
   touch "$LOG_FILE"
 }
 
-info(){ echo -e "\033[1;32m[INFO]\033[0m $*" | tee -a "$LOG_FILE"; }
-warn(){ echo -e "\033[1;33m[WARN]\033[0m $*" | tee -a "$LOG_FILE"; }
-err(){ echo -e "\033[1;31m[ERR ]\033[0m $*" | tee -a "$LOG_FILE" >&2; }
+info() {
+  echo -e "\033[1;32m[INFO]\033[0m $*"
+  echo "[INFO] $*" >> "$LOG_FILE"
+}
+
+warn() {
+  echo -e "\033[1;33m[WARN]\033[0m $*"
+  echo "[WARN] $*" >> "$LOG_FILE"
+}
+
+err() {
+  echo -e "\033[1;31m[ERR ]\033[0m $*" >&2
+  echo "[ERR ] $*" >> "$LOG_FILE"
+}
 die(){ err "$*"; exit 1; }
 
 need_cmd() {
@@ -64,6 +77,15 @@ run_root() {
 is_pid_alive() {
   local pid="${1:-}"
   [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+format_kb_gb_mb() {
+  local kb="${1:-0}"
+  awk -v kb="$kb" 'BEGIN {
+    gb = kb / 1024 / 1024
+    mb = kb / 1024
+    printf "%.2f GB (%.2f MB)", gb, mb
+  }'
 }
 
 ########################################
@@ -149,6 +171,81 @@ config_interactive() {
 }
 
 ########################################
+# 统计状态
+########################################
+
+init_stats() {
+  cat > "$STATS_FILE" <<EOF
+TASK_STATUS="initialized"
+START_TIME="$(date '+%F %T')"
+END_TIME=""
+TOTAL="0"
+DONE="0"
+SUCCESS="0"
+SKIP="0"
+FAIL="0"
+OVERWRITE="0"
+CURRENT_FILE=""
+LAST_MESSAGE="任务已初始化"
+EOF
+}
+
+load_stats() {
+  if [[ -f "$STATS_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$STATS_FILE"
+  else
+    TASK_STATUS="not_started"
+    START_TIME=""
+    END_TIME=""
+    TOTAL="0"
+    DONE="0"
+    SUCCESS="0"
+    SKIP="0"
+    FAIL="0"
+    OVERWRITE="0"
+    CURRENT_FILE=""
+    LAST_MESSAGE="暂无任务记录"
+  fi
+}
+
+save_stats() {
+  cat > "$STATS_FILE" <<EOF
+TASK_STATUS="${TASK_STATUS:-not_started}"
+START_TIME="${START_TIME:-}"
+END_TIME="${END_TIME:-}"
+TOTAL="${TOTAL:-0}"
+DONE="${DONE:-0}"
+SUCCESS="${SUCCESS:-0}"
+SKIP="${SKIP:-0}"
+FAIL="${FAIL:-0}"
+OVERWRITE="${OVERWRITE:-0}"
+CURRENT_FILE="${CURRENT_FILE:-}"
+LAST_MESSAGE="${LAST_MESSAGE:-}"
+EOF
+}
+
+set_stats_field() {
+  local key="$1" value="$2"
+  load_stats
+  case "$key" in
+    TASK_STATUS) TASK_STATUS="$value" ;;
+    START_TIME) START_TIME="$value" ;;
+    END_TIME) END_TIME="$value" ;;
+    TOTAL) TOTAL="$value" ;;
+    DONE) DONE="$value" ;;
+    SUCCESS) SUCCESS="$value" ;;
+    SKIP) SKIP="$value" ;;
+    FAIL) FAIL="$value" ;;
+    OVERWRITE) OVERWRITE="$value" ;;
+    CURRENT_FILE) CURRENT_FILE="$value" ;;
+    LAST_MESSAGE) LAST_MESSAGE="$value" ;;
+    *) die "未知统计字段: $key" ;;
+  esac
+  save_stats
+}
+
+########################################
 # rclone remote
 ########################################
 
@@ -165,6 +262,8 @@ install_deps() {
   need_cmd grep
   need_cmd head
   need_cmd tr
+  need_cmd wc
+  need_cmd date
 }
 
 config_remote() {
@@ -193,6 +292,28 @@ rclone_base_args() {
 }
 
 ########################################
+# 远端路径检查
+########################################
+
+remote_dir_exists() {
+  local remote_dir="$1"
+  rclone lsf "$remote_dir" >/dev/null 2>&1
+}
+
+ensure_remote_paths_exist() {
+  local src_remote="${REMOTE_NAME}:${SRC_PATH}"
+  local dst_remote="${REMOTE_NAME}:${DST_PATH}"
+
+  info "检查源路径是否存在: $src_remote"
+  remote_dir_exists "$src_remote" || die "云端下载路径不存在: $src_remote"
+
+  info "检查目标路径是否存在: $dst_remote"
+  remote_dir_exists "$dst_remote" || die "云端上传路径不存在: $dst_remote"
+
+  info "源路径和目标路径检查通过"
+}
+
+########################################
 # 空间检查
 ########################################
 
@@ -210,9 +331,9 @@ check_free_space() {
   usep="$(awk '{print $4}' <<<"$line" | tr -d '%')"
   freep=$((100 - usep))
 
-  info "磁盘总空间(KB): $total"
-  info "磁盘已用(KB): $used"
-  info "磁盘剩余(KB): $avail"
+  info "磁盘总空间: $(format_kb_gb_mb "$total")"
+  info "磁盘已用空间: $(format_kb_gb_mb "$used")"
+  info "磁盘剩余空间: $(format_kb_gb_mb "$avail")"
   info "磁盘剩余比例: ${freep}%"
 
   if (( freep < MIN_FREE_PERCENT )); then
@@ -250,6 +371,30 @@ list_source_files() {
   rclone lsf "$src_remote" -R --files-only
 }
 
+prepare_file_list() {
+  ensure_remote_paths_exist
+
+  : > "$LIST_FILE"
+  list_source_files > "$LIST_FILE"
+
+  local total_files
+  total_files="$(grep -c . "$LIST_FILE" 2>/dev/null || true)"
+  total_files="${total_files:-0}"
+
+  load_stats
+  TOTAL="$total_files"
+  DONE="0"
+  SUCCESS="0"
+  SKIP="0"
+  FAIL="0"
+  OVERWRITE="0"
+  CURRENT_FILE=""
+  LAST_MESSAGE="文件列表已生成"
+  save_stats
+
+  info "已预获取全部文件列表，总文件数: $total_files"
+}
+
 ########################################
 # 单文件下载+上传
 ########################################
@@ -284,15 +429,20 @@ cleanup_local_file() {
 }
 
 ########################################
-# 查重
+# 查重/覆盖判断
 # 目标同路径文件已存在，且大小相同 => 跳过
+# 目标同路径文件已存在，但大小不同 => 记为覆盖
 ########################################
+
+OVERWRITE_CURRENT=0
 
 should_skip_file() {
   local rel="$1"
   local src_remote="${REMOTE_NAME}:${SRC_PATH}/${rel}"
   local dst_remote="${REMOTE_NAME}:${DST_PATH}/${rel}"
   local src_size dst_size
+
+  OVERWRITE_CURRENT=0
 
   if ! remote_file_exists "$dst_remote"; then
     return 1
@@ -306,6 +456,7 @@ should_skip_file() {
     return 0
   fi
 
+  OVERWRITE_CURRENT=1
   warn "目标存在同名文件但大小不同，将覆盖: $rel"
   return 1
 }
@@ -315,27 +466,72 @@ should_skip_file() {
 ########################################
 
 run_job() {
-  local total=0 success=0 skip=0 fail=0
+  local total=0 success=0 skip=0 fail=0 overwrite=0
   local rel local_tmp downloaded_size
+  local overwrite_this=0
+
+  trap '
+    load_stats
+    TASK_STATUS="stopped"
+    END_TIME="$(date "+%F %T")"
+    LAST_MESSAGE="任务已停止"
+    CURRENT_FILE=""
+    save_stats
+    rm -f "'"$PID_FILE"'" 2>/dev/null || true
+    exit 1
+  ' INT TERM
+
+  [[ -f "$LIST_FILE" ]] || die "文件列表不存在，请重新 start"
 
   run_root mkdir -p "$TMP_DIR"
 
-  info "开始扫描源目录: ${REMOTE_NAME}:${SRC_PATH}"
+  load_stats
+  total="${TOTAL:-0}"
+  TASK_STATUS="running"
+  START_TIME="$(date '+%F %T')"
+  END_TIME=""
+  DONE="0"
+  SUCCESS="0"
+  SKIP="0"
+  FAIL="0"
+  OVERWRITE="0"
+  CURRENT_FILE=""
+  LAST_MESSAGE="任务开始执行"
+  save_stats
+
+  info "开始扫描执行"
+  info "源目录: ${REMOTE_NAME}:${SRC_PATH}"
   info "目标目录: ${REMOTE_NAME}:${DST_PATH}"
   info "本地临时目录: $TMP_DIR"
+  info "本次任务总文件数: $total"
 
   while IFS= read -r rel; do
     [[ -n "${rel:-}" ]] || continue
-    ((total+=1))
 
     info "----------------------------------------"
     info "处理文件: $rel"
 
+    load_stats
+    CURRENT_FILE="$rel"
+    LAST_MESSAGE="正在处理: $rel"
+    save_stats
+
     check_free_space
 
+    overwrite_this=0
     if should_skip_file "$rel"; then
       ((skip+=1))
+      load_stats
+      DONE=$((DONE + 1))
+      SKIP="$skip"
+      CURRENT_FILE="$rel"
+      LAST_MESSAGE="已跳过: $rel"
+      save_stats
       continue
+    fi
+
+    if (( OVERWRITE_CURRENT == 1 )); then
+      overwrite_this=1
     fi
 
     local_tmp="$TMP_DIR/$rel"
@@ -345,6 +541,12 @@ run_job() {
       err "下载失败: $rel"
       cleanup_local_file "$rel"
       ((fail+=1))
+      load_stats
+      DONE=$((DONE + 1))
+      FAIL="$fail"
+      CURRENT_FILE="$rel"
+      LAST_MESSAGE="下载失败: $rel"
+      save_stats
       continue
     fi
 
@@ -353,6 +555,12 @@ run_job() {
       err "下载后本地文件无效或为 0B: $rel"
       cleanup_local_file "$rel"
       ((fail+=1))
+      load_stats
+      DONE=$((DONE + 1))
+      FAIL="$fail"
+      CURRENT_FILE="$rel"
+      LAST_MESSAGE="下载后本地文件无效: $rel"
+      save_stats
       continue
     fi
 
@@ -362,17 +570,48 @@ run_job() {
       err "上传失败: $rel"
       cleanup_local_file "$rel"
       ((fail+=1))
+      load_stats
+      DONE=$((DONE + 1))
+      FAIL="$fail"
+      CURRENT_FILE="$rel"
+      LAST_MESSAGE="上传失败: $rel"
+      save_stats
       continue
     fi
 
     cleanup_local_file "$rel"
     info "完成: $rel"
-    ((success+=1))
 
-  done < <(list_source_files)
+    ((success+=1))
+    if (( overwrite_this == 1 )); then
+      ((overwrite+=1))
+    fi
+
+    load_stats
+    DONE=$((DONE + 1))
+    SUCCESS="$success"
+    OVERWRITE="$overwrite"
+    CURRENT_FILE="$rel"
+    LAST_MESSAGE="已完成: $rel"
+    save_stats
+
+  done < "$LIST_FILE"
 
   info "----------------------------------------"
-  info "任务完成：总计=$total 成功=$success 跳过=$skip 失败=$fail"
+  info "任务完成：总计=$total 成功=$success 跳过=$skip 失败=$fail 覆盖=$overwrite"
+
+  load_stats
+  TASK_STATUS="finished"
+  END_TIME="$(date '+%F %T')"
+  CURRENT_FILE=""
+  LAST_MESSAGE="任务完成"
+  TOTAL="$total"
+  DONE=$((success + skip + fail))
+  SUCCESS="$success"
+  SKIP="$skip"
+  FAIL="$fail"
+  OVERWRITE="$overwrite"
+  save_stats
 
   rm -f "$PID_FILE" 2>/dev/null || true
 }
@@ -385,9 +624,11 @@ install_cmd() {
   ensure_state_dir
   load_config
   install_deps
+  init_stats
   config_interactive
   load_config
   config_remote
+  ensure_remote_paths_exist
   info "安装完成"
   info "接下来可执行：start / stop / restart / status / reconfig / uninstall"
 }
@@ -397,6 +638,7 @@ start_cmd() {
   load_config
   install_deps
   config_remote
+  ensure_remote_paths_exist
 
   if [[ -f "$PID_FILE" ]]; then
     local oldpid
@@ -408,10 +650,12 @@ start_cmd() {
     fi
   fi
 
+  init_stats
+  prepare_file_list
+
   (
     run_job
-  ) >>"$LOG_FILE" 2>&1 &
-
+  ) 2>&1 >/dev/null &
   echo $! > "$PID_FILE"
   info "后台任务已启动，PID=$(cat "$PID_FILE")"
   info "日志文件: $LOG_FILE"
@@ -419,9 +663,16 @@ start_cmd() {
 
 stop_cmd() {
   ensure_state_dir
+  load_config
 
   if [[ ! -f "$PID_FILE" ]]; then
     warn "没有运行中的任务"
+    load_stats
+    TASK_STATUS="stopped"
+    END_TIME="$(date '+%F %T')"
+    LAST_MESSAGE="任务未运行"
+    CURRENT_FILE=""
+    save_stats
     return 0
   fi
 
@@ -438,6 +689,14 @@ stop_cmd() {
   fi
 
   rm -f "$PID_FILE"
+
+  load_stats
+  TASK_STATUS="stopped"
+  END_TIME="$(date '+%F %T')"
+  LAST_MESSAGE="任务已停止"
+  CURRENT_FILE=""
+  save_stats
+
   info "任务已停止"
 
   if [[ -d "$TMP_DIR" ]]; then
@@ -455,6 +714,20 @@ restart_cmd() {
 status_cmd() {
   ensure_state_dir
   load_config
+  load_stats
+
+  local pid=""
+  local progress_percent="0.00"
+  local remaining="0"
+
+  if [[ -f "$PID_FILE" ]]; then
+    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  fi
+
+  if [[ "${TOTAL:-0}" -gt 0 ]]; then
+    progress_percent="$(awk -v d="${DONE:-0}" -v t="${TOTAL:-0}" 'BEGIN { printf "%.2f", (d/t)*100 }')"
+    remaining=$(( TOTAL - DONE ))
+  fi
 
   echo
   echo "========= 状态 ========="
@@ -465,33 +738,46 @@ status_cmd() {
   echo "目标路径: ${REMOTE_NAME}:${DST_PATH}"
   echo
 
-  if [[ -f "$PID_FILE" ]]; then
-    local pid
-    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if is_pid_alive "$pid"; then
-      echo "[任务] 运行中 PID=$pid"
-    else
-      echo "[任务] PID 文件存在，但进程已退出"
-    fi
+  if [[ -n "$pid" ]] && is_pid_alive "$pid"; then
+    echo "[任务] 运行中 PID=$pid"
+  elif [[ -f "$PID_FILE" ]]; then
+    echo "[任务] PID 文件存在，但进程已退出"
   else
     echo "[任务] 未运行"
   fi
 
+  echo "任务状态: ${TASK_STATUS:-not_started}"
+  echo "开始时间: ${START_TIME:-}"
+  echo "结束时间: ${END_TIME:-}"
+  echo "当前文件: ${CURRENT_FILE:-}"
+  echo "最后信息: ${LAST_MESSAGE:-}"
+  echo
+  echo "本次任务进度:"
+  echo "  总数: ${TOTAL:-0}"
+  echo "  已完成: ${DONE:-0}"
+  echo "  成功: ${SUCCESS:-0}"
+  echo "  跳过: ${SKIP:-0}"
+  echo "  失败: ${FAIL:-0}"
+  echo "  覆盖: ${OVERWRITE:-0}"
+  echo "  剩余: ${remaining:-0}"
+  echo "  进度: ${progress_percent}%"
   echo "========================"
 }
 
 reconfig_cmd() {
   ensure_state_dir
   load_config
+  install_deps
   config_interactive
   load_config
   config_remote
+  ensure_remote_paths_exist
   info "重配置完成"
 }
 
 uninstall_cmd() {
   stop_cmd || true
-  rm -f "$CONFIG_FILE" "$PID_FILE"
+  rm -f "$CONFIG_FILE" "$PID_FILE" "$STATS_FILE" "$LIST_FILE"
   warn "已删除配置和状态文件"
   warn "日志文件保留: $LOG_FILE"
   warn "临时目录保留: $TMP_DIR"
@@ -506,17 +792,20 @@ usage() {
   start        后台开始逐文件下载/上传
   stop         停止当前任务
   restart      重启任务
-  status       查看状态
+  status       查看状态与本次任务进度
   reconfig     重新配置
   uninstall    删除配置和状态文件
 
 说明:
   1. 不使用 systemd
   2. 不需要 mount，直接使用 rclone copyto
+  3. start 时先获取全部文件列表用于统计总数
+  4. 云端源路径或目标路径不存在时直接退出
   5. 逐个文件处理，处理完即删除本地临时文件
   6. 保留子目录结构
   7. 目标同路径同大小文件直接跳过
-  8. 本地剩余空间低于 ${MIN_FREE_PERCENT_DEFAULT}% 直接退出
+  8. 目标同路径不同大小文件记为覆盖
+  9. 本地剩余空间低于 ${MIN_FREE_PERCENT_DEFAULT}% 直接退出
 EOF
 }
 
