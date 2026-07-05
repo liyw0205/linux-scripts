@@ -572,7 +572,48 @@
 - 未执行真实 Mihomo 安装、配置测试、systemd 重启或外部下载。
 - 命令行形式 `auth <用户名> <密码>` 便于自动化，但密码会进入 shell history；人工使用建议 `auth set <用户名>` 后隐藏输入密码。
 
-## 阶段 14 预期
+## 阶段 14：Mihomo 订阅更新命令
+
+日期：2026-07-06
+
+### 已完成
+
+- 使用主代理 + 1 个子代理完成 Mihomo 订阅更新方案审查和实现。
+- `mihomo.sh`
+  - 新增 `SUB_URL_FILE="$MIHOMO_DIR/subscription.url"`，导入订阅成功后持久化原始订阅链接。
+  - 新增 `sub update`、`update-sub`、`sub status` 命令：
+    - `sub update` 使用已保存链接重新下载订阅并重建代理组配置。
+    - `update-sub` 作为兼容别名。
+    - `sub status` 只显示是否已保存链接，不输出订阅 URL 明文。
+  - `sub` 无参数时隐藏输入订阅链接，减少 token 泄露到终端回显。
+  - 订阅下载改用专用 helper，通过 `curl --config -` 从 stdin 传入 URL，避免 URL 出现在 curl argv 中。
+  - 订阅 URL 文件用同目录临时文件 + `mv` 原子发布，并设置 `600` 权限。
+  - 订阅下载失败、HTML 响应或文件过小时不替换旧 `subscription.yaml`，也不覆盖旧 URL。
+  - 交互菜单增加“更新订阅”。
+- `tests/mihomo_subscription_update_regression.sh`
+  - 覆盖导入成功后写入 `subscription.yaml` 和 `subscription.url`。
+  - 覆盖 `sub update` / `update-sub` 使用已保存 URL 更新订阅。
+  - 覆盖无 URL 文件时中文报错。
+  - 覆盖 HTML、过小文件等失败路径保留旧订阅和旧 URL。
+  - 覆盖命令输出不泄露订阅 token，且 URL 不进入 curl argv。
+- README 同步 Mihomo 订阅导入、更新和状态命令。
+- `scripts/test.sh` 接入新增订阅更新回归测试。
+
+### 验证结果
+
+- `bash -n mihomo.sh tests/mihomo_subscription_update_regression.sh scripts/test.sh` 通过。
+- `bash tests/mihomo_subscription_update_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实订阅网络下载、Mihomo 配置测试、systemd 重启或外部服务部署。
+- 命令行形式 `sub <订阅链接>` 便于自动化，但订阅链接会进入 shell history；人工使用建议执行 `sub` 后隐藏输入。
+
+## 阶段 15 预期
 
 继续做运行时一致性和测试覆盖收敛：
 

@@ -76,6 +76,7 @@ reset_mihomo_paths() {
   SERVICE_FILE="$TMP_DIR/systemd/mihomo.service"
   UI_DIR="$MIHOMO_DIR/ui"
   SUB_FILE="$MIHOMO_DIR/subscription.yaml"
+  SUB_URL_FILE="$MIHOMO_DIR/subscription.url"
   COUNTRY_MMDB="$MIHOMO_DIR/Country.mmdb"
   SOCKS5_GROUP_STATE="$MIHOMO_DIR/socks5_group.conf"
   mkdir -p "$MIHOMO_DIR" "$MIHOMO_BIN_DIR" "$TMP_DIR/systemd"

@@ -3,7 +3,7 @@
 # Mihomo Linux 一体化管理脚本
 # 功能：
 # 安装、卸载、启动、停止、重启、状态、日志
-# 前端切换、订阅导入
+# 前端切换、订阅导入/更新
 # 修改 external-controller 管理端口
 # 修改 HTTP 代理端口 port
 # 修改 SOCKS5 代理端口 socks-port
@@ -27,6 +27,7 @@ CONFIG_FILE="$MIHOMO_DIR/config.yaml"
 SERVICE_FILE="/etc/systemd/system/mihomo.service"
 UI_DIR="$MIHOMO_DIR/ui"
 SUB_FILE="$MIHOMO_DIR/subscription.yaml"
+SUB_URL_FILE="$MIHOMO_DIR/subscription.url"
 COUNTRY_MMDB="$MIHOMO_DIR/Country.mmdb"
 SOCKS5_GROUP_STATE="$MIHOMO_DIR/socks5_group.conf"
 
@@ -1395,51 +1396,169 @@ show_frontend_info() {
     echo -e "${CYAN}前端目录：${NC}${UI_DIR}"
 }
 
+validate_subscription_file() {
+    local file="$1"
+    local size
+
+    size="$(stat -c%s "$file" 2>/dev/null || echo 0)"
+    if [ "$size" -lt 20 ]; then
+        log_error "订阅文件过小，可能无效"
+        return 1
+    fi
+
+    if grep -qiE "<html|<!doctype html" "$file"; then
+        log_error "下载到的是网页，不是订阅 YAML"
+        return 1
+    fi
+}
+
+validate_subscription_url() {
+    local url="$1"
+
+    if [ -z "$url" ]; then
+        log_error "订阅链接不能为空"
+        return 1
+    fi
+
+    if [[ "$url" == *$'\n'* || "$url" == *$'\r'* ]]; then
+        log_error "订阅链接不能包含换行"
+        return 1
+    fi
+}
+
+curl_config_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "$value"
+}
+
+download_subscription_file() {
+    local url="$1"
+    local output="$2"
+    local quoted_url
+
+    validate_subscription_url "$url" || return 1
+    quoted_url="$(curl_config_quote "$url")"
+
+    if ! printf 'url = %s\n' "$quoted_url" | curl -fL --connect-timeout 10 --max-time 120 -A "Clash Verge" -H "User-Agent: Clash Verge" -o "$output" --config -; then
+        log_error "订阅下载失败"
+        return 1
+    fi
+
+    validate_subscription_file "$output"
+}
+
+save_subscription_url() {
+    local url="$1"
+    local tmp_file
+
+    validate_subscription_url "$url" || return 1
+    mkdir -p "$MIHOMO_DIR"
+    tmp_file="$(mktemp "$MIHOMO_DIR/.subscription.url.XXXXXX")" || return 1
+    printf '%s\n' "$url" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+    chmod 600 "$tmp_file" 2>/dev/null || true
+    mv "$tmp_file" "$SUB_URL_FILE" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+    chmod 600 "$SUB_URL_FILE" 2>/dev/null || true
+}
+
+get_subscription_url() {
+    [ -f "$SUB_URL_FILE" ] || return 0
+    sed -n '1{s/\r$//;p;q;}' "$SUB_URL_FILE"
+}
+
+download_and_publish_subscription() {
+    local url="$1"
+    local action="${2:-更新}"
+    local tmp_sub
+
+    mkdir -p "$MIHOMO_DIR"
+    log_info "开始${action}订阅..."
+
+    tmp_sub="$(mktemp "$MIHOMO_DIR/subscription.XXXXXX")" || return 1
+    if ! download_subscription_file "$url" "$tmp_sub"; then
+        rm -f "$tmp_sub"
+        return 1
+    fi
+
+    backup_file "$SUB_FILE"
+    if ! mv "$tmp_sub" "$SUB_FILE"; then
+        log_error "订阅保存失败：$SUB_FILE"
+        rm -f "$tmp_sub"
+        return 1
+    fi
+    chmod 600 "$SUB_FILE" 2>/dev/null || true
+    log_success "订阅已保存：$SUB_FILE"
+}
+
+show_subscription_status() {
+    echo ""
+    echo -e "${CYAN}订阅状态：${NC}"
+    if [ -f "$SUB_FILE" ]; then
+        echo "  订阅文件：$SUB_FILE"
+    else
+        echo "  订阅文件：未导入"
+    fi
+
+    if [ -s "$SUB_URL_FILE" ]; then
+        echo "  订阅链接：已保存（出于安全考虑不显示明文）"
+        echo "  更新命令：sudo bash mihomo.sh sub update"
+    else
+        echo "  订阅链接：未保存"
+        echo "  导入命令：sudo bash mihomo.sh sub <订阅链接>"
+    fi
+    echo ""
+}
+
 import_subscription() {
     check_root
-    mkdir -p "$MIHOMO_DIR"
 
     local url="${1:-}"
-    local tmp_sub
     if [ -z "$url" ]; then
-        read -r -p "请输入订阅链接：" url
+        read -r -s -p "请输入订阅链接（输入不会显示）：" url
+        echo ""
     fi
 
     if [ -z "$url" ]; then
         log_error "订阅链接不能为空"
-        exit 1
+        return 1
     fi
 
-    log_info "开始下载订阅..."
-    backup_file "$SUB_FILE"
-
-    tmp_sub="$(mktemp "$MIHOMO_DIR/subscription.XXXXXX")"
-    if ! curl -fL --connect-timeout 10 --max-time 120 -A "Clash Verge" -H "User-Agent: Clash Verge" -o "$tmp_sub" "$url"; then
-        log_error "订阅下载失败"
-        rm -f "$tmp_sub"
-        exit 1
-    fi
-
-    local size
-    size="$(stat -c%s "$tmp_sub" 2>/dev/null || echo 0)"
-    if [ "$size" -lt 20 ]; then
-        log_error "订阅文件过小，可能无效"
-        rm -f "$tmp_sub"
-        exit 1
-    fi
-
-    if grep -qiE "<html|<!doctype html" "$tmp_sub"; then
-        log_error "下载到的是网页，不是订阅 YAML"
-        rm -f "$tmp_sub"
-        exit 1
-    fi
-
-    mv "$tmp_sub" "$SUB_FILE"
-    log_success "订阅已保存：$SUB_FILE"
+    download_and_publish_subscription "$url" "导入" || return 1
+    save_subscription_url "$url" || {
+        log_error "订阅链接保存失败：$SUB_URL_FILE"
+        return 1
+    }
+    log_success "订阅链接已保存，后续可执行：sudo bash mihomo.sh sub update"
 
     create_subscription_config
     test_and_restart
     log_success "订阅导入完成，Mihomo 已重启"
+    show_access_info
+}
+
+update_subscription() {
+    check_root
+    local url
+
+    url="$(get_subscription_url)"
+    if [ -z "${url:-}" ]; then
+        log_error "未找到已保存的订阅链接"
+        log_info "请先导入订阅：sudo bash mihomo.sh sub <订阅链接>"
+        return 1
+    fi
+
+    download_and_publish_subscription "$url" "更新" || return 1
+
+    create_subscription_config
+    test_and_restart
+    log_success "订阅更新完成，Mihomo 已重启"
     show_access_info
 }
 
@@ -1815,19 +1934,20 @@ show_menu() {
     echo "  5) 查看状态"
     echo "  6) 查看日志"
     echo "  7) 导入订阅"
-    echo "  8) 修改 Web 管理端口 external-controller"
-    echo "  9) 修改 HTTP 代理端口 port"
-    echo " 10) 修改 SOCKS5 代理端口 socks-port"
-    echo " 11) 设置 HTTP / SOCKS5 代理认证"
-    echo " 12) 切换前端"
-    echo " 13) 查看前端信息"
-    echo " 14) 测试配置"
-    echo " 15) 重新生成自动/均衡代理组"
-    echo " 16) 修复/下载 Country.mmdb"
-    echo " 17) 启用 SOCKS5 多端口组"
-    echo " 18) 移除 SOCKS5 多端口组"
-    echo " 19) 查看 SOCKS5 多端口组状态"
-    echo " 20) 卸载 Mihomo"
+    echo "  8) 更新订阅"
+    echo "  9) 修改 Web 管理端口 external-controller"
+    echo " 10) 修改 HTTP 代理端口 port"
+    echo " 11) 修改 SOCKS5 代理端口 socks-port"
+    echo " 12) 设置 HTTP / SOCKS5 代理认证"
+    echo " 13) 切换前端"
+    echo " 14) 查看前端信息"
+    echo " 15) 测试配置"
+    echo " 16) 重新生成自动/均衡代理组"
+    echo " 17) 修复/下载 Country.mmdb"
+    echo " 18) 启用 SOCKS5 多端口组"
+    echo " 19) 移除 SOCKS5 多端口组"
+    echo " 20) 查看 SOCKS5 多端口组状态"
+    echo " 21) 卸载 Mihomo"
     echo "  0) 退出"
     echo ""
 }
@@ -1844,19 +1964,20 @@ interactive_menu() {
             5) status_mihomo ;;
             6) log_mihomo ;;
             7) import_subscription ;;
-            8) change_controller_port ;;
-            9) change_http_port ;;
-            10) change_socks_port ;;
-            11) configure_proxy_auth_menu ;;
-            12) install_frontend ;;
-            13) show_frontend_info ;;
-            14) test_config ;;
-            15) regenerate_proxy_groups ;;
-            16) repair_mmdb ;;
-            17) enable_socks5_group ;;
-            18) disable_socks5_group ;;
-            19) show_socks5_group_status ;;
-            20) uninstall_mihomo ;;
+            8) update_subscription ;;
+            9) change_controller_port ;;
+            10) change_http_port ;;
+            11) change_socks_port ;;
+            12) configure_proxy_auth_menu ;;
+            13) install_frontend ;;
+            14) show_frontend_info ;;
+            15) test_config ;;
+            16) regenerate_proxy_groups ;;
+            17) repair_mmdb ;;
+            18) enable_socks5_group ;;
+            19) disable_socks5_group ;;
+            20) show_socks5_group_status ;;
+            21) uninstall_mihomo ;;
             0) exit 0 ;;
             *) log_error "无效选项" ;;
         esac
@@ -1885,7 +2006,10 @@ Mihomo 一体化管理脚本
   test                       测试配置
 
 订阅：
-  sub [订阅链接]              导入订阅并生成自动代理组
+  sub [订阅链接]              导入订阅、保存链接并生成自动代理组
+  sub update                  使用已保存链接更新订阅
+  sub status                  查看订阅状态
+  update-sub                  同 sub update
   subscription [订阅链接]     同 sub
   groups                      重新生成自动选择、故障转移、负载均衡代理组
 
@@ -1919,6 +2043,8 @@ SOCKS5 多端口组：
 安装后的快捷命令：
   mihomoctl status
   mihomoctl sub
+  mihomoctl sub update
+  mihomoctl sub status
   mihomoctl port 8899
   mihomoctl http 7890
   mihomoctl socks 7891
@@ -2028,7 +2154,20 @@ main() {
 
         mmdb|geoip|country|repair-mmdb) repair_mmdb ;;
 
-        sub|subscription|import-sub) import_subscription "${2:-}" ;;
+        sub|subscription|import-sub)
+            case "${2:-}" in
+                update|refresh)
+                    update_subscription
+                    ;;
+                status|info)
+                    show_subscription_status
+                    ;;
+                *)
+                    import_subscription "${2:-}"
+                    ;;
+            esac
+            ;;
+        update-sub|sub-update|update-subscription|subscription-update|refresh-sub) update_subscription ;;
         groups|proxy-groups|regenerate-groups) regenerate_proxy_groups ;;
 
         port|controller|change-port) change_controller_port "${2:-}" ;;
