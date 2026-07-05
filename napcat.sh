@@ -1,9 +1,9 @@
+#!/usr/bin/env bash
 # NapCat 管理脚本（单文件备份版）
 # 备份: 复制本文件即可
 # 部署: bash /root/napcat.sh deploy
 # 或:   /root/napcat.sh deploy
 
-#!/usr/bin/env bash
 set -euo pipefail
 
 BASE_DIR="${NAPCAT_BASE_DIR:-/root}"

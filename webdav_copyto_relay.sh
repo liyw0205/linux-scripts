@@ -122,6 +122,27 @@ write_config_kv() {
   printf '%s=%q\n' "$key" "$value"
 }
 
+encode_state_value() {
+  local value="$1"
+  value="${value//'%'/'%25'}"
+  value="${value//$'\r'/'%0D'}"
+  value="${value//$'\n'/'%0A'}"
+  printf '%s' "$value"
+}
+
+decode_state_value() {
+  local value="$1"
+  value="${value//'%0A'/$'\n'}"
+  value="${value//'%0D'/$'\r'}"
+  value="${value//'%25'/'%'}"
+  printf '%s' "$value"
+}
+
+write_state_kv() {
+  local key="$1" value="$2"
+  printf '%s=%s\n' "$key" "$(encode_state_value "$value")"
+}
+
 save_config() {
   {
     write_config_kv WEBDAV_URL "$WEBDAV_URL"
@@ -142,6 +163,7 @@ save_config() {
     write_config_kv RCLONE_TIMEOUT "$RCLONE_TIMEOUT"
     write_config_kv RCLONE_CONTIMEOUT "$RCLONE_CONTIMEOUT"
   } > "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 ask_default() {
@@ -180,54 +202,69 @@ config_interactive() {
 ########################################
 
 init_stats() {
-  cat > "$STATS_FILE" <<EOF
-TASK_STATUS="initialized"
-START_TIME="$(date '+%F %T')"
-END_TIME=""
-TOTAL="0"
-DONE="0"
-SUCCESS="0"
-SKIP="0"
-FAIL="0"
-OVERWRITE="0"
-CURRENT_FILE=""
-LAST_MESSAGE="任务已初始化"
-EOF
+  TASK_STATUS="initialized"
+  START_TIME="$(date '+%F %T')"
+  END_TIME=""
+  TOTAL="0"
+  DONE="0"
+  SUCCESS="0"
+  SKIP="0"
+  FAIL="0"
+  OVERWRITE="0"
+  CURRENT_FILE=""
+  LAST_MESSAGE="任务已初始化"
+  save_stats
 }
 
 load_stats() {
+  TASK_STATUS="not_started"
+  START_TIME=""
+  END_TIME=""
+  TOTAL="0"
+  DONE="0"
+  SUCCESS="0"
+  SKIP="0"
+  FAIL="0"
+  OVERWRITE="0"
+  CURRENT_FILE=""
+  LAST_MESSAGE="暂无任务记录"
+
   if [[ -f "$STATS_FILE" ]]; then
-    # shellcheck disable=SC1090
-    source "$STATS_FILE"
-  else
-    TASK_STATUS="not_started"
-    START_TIME=""
-    END_TIME=""
-    TOTAL="0"
-    DONE="0"
-    SUCCESS="0"
-    SKIP="0"
-    FAIL="0"
-    OVERWRITE="0"
-    CURRENT_FILE=""
-    LAST_MESSAGE="暂无任务记录"
+    local key value
+    while IFS='=' read -r key value; do
+      value="$(decode_state_value "${value:-}")"
+      case "$key" in
+        TASK_STATUS) TASK_STATUS="$value" ;;
+        START_TIME) START_TIME="$value" ;;
+        END_TIME) END_TIME="$value" ;;
+        TOTAL) TOTAL="$value" ;;
+        DONE) DONE="$value" ;;
+        SUCCESS) SUCCESS="$value" ;;
+        SKIP) SKIP="$value" ;;
+        FAIL) FAIL="$value" ;;
+        OVERWRITE) OVERWRITE="$value" ;;
+        CURRENT_FILE) CURRENT_FILE="$value" ;;
+        LAST_MESSAGE) LAST_MESSAGE="$value" ;;
+      esac
+    done < "$STATS_FILE"
   fi
 }
 
 save_stats() {
-  cat > "$STATS_FILE" <<EOF
-TASK_STATUS="${TASK_STATUS:-not_started}"
-START_TIME="${START_TIME:-}"
-END_TIME="${END_TIME:-}"
-TOTAL="${TOTAL:-0}"
-DONE="${DONE:-0}"
-SUCCESS="${SUCCESS:-0}"
-SKIP="${SKIP:-0}"
-FAIL="${FAIL:-0}"
-OVERWRITE="${OVERWRITE:-0}"
-CURRENT_FILE="${CURRENT_FILE:-}"
-LAST_MESSAGE="${LAST_MESSAGE:-}"
-EOF
+  {
+    write_state_kv TASK_STATUS "${TASK_STATUS:-not_started}"
+    write_state_kv START_TIME "${START_TIME:-}"
+    write_state_kv END_TIME "${END_TIME:-}"
+    write_state_kv TOTAL "${TOTAL:-0}"
+    write_state_kv DONE "${DONE:-0}"
+    write_state_kv SUCCESS "${SUCCESS:-0}"
+    write_state_kv SKIP "${SKIP:-0}"
+    write_state_kv FAIL "${FAIL:-0}"
+    write_state_kv OVERWRITE "${OVERWRITE:-0}"
+    write_state_kv CURRENT_FILE "${CURRENT_FILE:-}"
+    write_state_kv LAST_MESSAGE "${LAST_MESSAGE:-}"
+  } > "$STATS_FILE"
+  chmod 600 "$STATS_FILE" 2>/dev/null || true
 }
 
 set_stats_field() {

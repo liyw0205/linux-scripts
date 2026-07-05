@@ -427,6 +427,27 @@ napcat -q <QQ号> start
 | `astr.sh` | `git`, `python3`, `python3-venv`, `pip`, `screen` |
 | `napcat.sh` | `curl`, `git`, `node/npm`, `make/gcc`, `xvfb`, `screen`, `qq` |
 
+## 开发与校验
+
+本仓库按阶段迭代优化。每个阶段结束前需要运行本地校验、更新阶段文档，并通过 Git 提交固定结果。
+
+常用开发命令：
+
+```bash
+make validate
+make lint
+make format
+```
+
+说明：
+
+- `make validate` 会动态发现仓库内的 `.sh` 文件并执行 `bash -n`。
+- 如果本机安装了 `shellcheck` 和 `shfmt`，`make validate` 会自动执行可选 lint。
+- `make lint` 等同严格模式，存在可选 lint 问题时返回失败。
+- `make format` 复用成熟工具 `shfmt` 格式化脚本，不手写格式化器。
+- 可以安装 `pre-commit` 后执行 `pre-commit install`，提交前会复用 `make validate`。
+- 后续需要测试时优先复用 `bats-core`，需要 YAML 结构化修改时优先复用 `yq`。
+
 ## 备注
 
 - `astrbot_install.sh` 已移除，当前 AstrBot 管理由 `astr.sh` 负责。

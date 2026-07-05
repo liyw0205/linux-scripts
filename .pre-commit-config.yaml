@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: linux-scripts-validate
+        name: validate shell scripts
+        entry: make validate
+        language: system
+        pass_filenames: false
+        files: '(^|/)([^/]+\.sh|scripts/[^/]+\.sh)$'
