@@ -72,7 +72,7 @@ check_root() {
 }
 
 command_exists() {
-    command -v "$1" >/dev 2>&1
+    command -v "$1" >/dev/null 2>&1
 }
 
 detect_os() {

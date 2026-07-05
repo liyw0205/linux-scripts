@@ -1,0 +1,5 @@
+.webdav_copyto_relay/
+webdav_copyto_relay.conf
+*.bak.*
+*.log
+*.pid

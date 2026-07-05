@@ -1,9 +1,9 @@
+#!/usr/bin/env bash
 # AstrBot 管理脚本（单文件备份版）
 # 备份: 复制本文件即可
 # 部署: bash /root/astr.sh deploy
 # 或:   /root/astr.sh deploy
 
-#!/usr/bin/env bash
 set -euo pipefail
 
 APP_DIR="/root/AstrBot"

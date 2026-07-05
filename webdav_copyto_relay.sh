@@ -117,26 +117,31 @@ load_config() {
   RCLONE_CONTIMEOUT="${RCLONE_CONTIMEOUT:-$RCLONE_CONTIMEOUT_DEFAULT}"
 }
 
+write_config_kv() {
+  local key="$1" value="$2"
+  printf '%s=%q\n' "$key" "$value"
+}
+
 save_config() {
-  cat > "$CONFIG_FILE" <<EOF
-WEBDAV_URL="$WEBDAV_URL"
-WEBDAV_USER="$WEBDAV_USER"
-WEBDAV_PASS="$WEBDAV_PASS"
-REMOTE_NAME="$REMOTE_NAME"
-
-SRC_PATH="$SRC_PATH"
-DST_PATH="$DST_PATH"
-
-TMP_DIR="$TMP_DIR"
-MIN_FREE_PERCENT="$MIN_FREE_PERCENT"
-
-RCLONE_TRANSFERS="$RCLONE_TRANSFERS"
-RCLONE_CHECKERS="$RCLONE_CHECKERS"
-RCLONE_RETRIES="$RCLONE_RETRIES"
-RCLONE_LOW_LEVEL_RETRIES="$RCLONE_LOW_LEVEL_RETRIES"
-RCLONE_TIMEOUT="$RCLONE_TIMEOUT"
-RCLONE_CONTIMEOUT="$RCLONE_CONTIMEOUT"
-EOF
+  {
+    write_config_kv WEBDAV_URL "$WEBDAV_URL"
+    write_config_kv WEBDAV_USER "$WEBDAV_USER"
+    write_config_kv WEBDAV_PASS "$WEBDAV_PASS"
+    write_config_kv REMOTE_NAME "$REMOTE_NAME"
+    echo
+    write_config_kv SRC_PATH "$SRC_PATH"
+    write_config_kv DST_PATH "$DST_PATH"
+    echo
+    write_config_kv TMP_DIR "$TMP_DIR"
+    write_config_kv MIN_FREE_PERCENT "$MIN_FREE_PERCENT"
+    echo
+    write_config_kv RCLONE_TRANSFERS "$RCLONE_TRANSFERS"
+    write_config_kv RCLONE_CHECKERS "$RCLONE_CHECKERS"
+    write_config_kv RCLONE_RETRIES "$RCLONE_RETRIES"
+    write_config_kv RCLONE_LOW_LEVEL_RETRIES "$RCLONE_LOW_LEVEL_RETRIES"
+    write_config_kv RCLONE_TIMEOUT "$RCLONE_TIMEOUT"
+    write_config_kv RCLONE_CONTIMEOUT "$RCLONE_CONTIMEOUT"
+  } > "$CONFIG_FILE"
 }
 
 ask_default() {

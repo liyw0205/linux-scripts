@@ -756,11 +756,11 @@ run_napcat() {
     fi
 
     if [[ "${#xvfb_runner[@]}" -gt 0 ]]; then
-      echo "[napcat] 启动命令: xvfb-run -a ${QQ_BIN} ${qq_args[*]:-}"
-      NAPCAT_BOOTMAIN="${BASE_DIR}" "${xvfb_runner[@]}" env NAPCAT_BOOTMAIN="${BASE_DIR}" "${QQ_BIN}" "${qq_args[@]}" &
+      echo "[napcat] 启动命令: LD_PRELOAD=${LAUNCHER_SO} xvfb-run -a ${QQ_BIN} ${qq_args[*]:-}"
+      "${xvfb_runner[@]}" env         LD_PRELOAD="${LAUNCHER_SO}"         NAPCAT_BOOTMAIN="${BASE_DIR}"         "${QQ_BIN}" "${qq_args[@]}" &
     else
-      echo "[napcat] 启动命令: ${QQ_BIN} ${qq_args[*]:-}"
-      NAPCAT_BOOTMAIN="${BASE_DIR}" DISPLAY="${DISPLAY_NUM}" "${QQ_BIN}" "${qq_args[@]}" &
+      echo "[napcat] 启动命令: LD_PRELOAD=${LAUNCHER_SO} ${QQ_BIN} ${qq_args[*]:-}"
+      env LD_PRELOAD="${LAUNCHER_SO}" NAPCAT_BOOTMAIN="${BASE_DIR}" DISPLAY="${DISPLAY_NUM}"         "${QQ_BIN}" "${qq_args[@]}" &
     fi
     child_pid="$!"
 
