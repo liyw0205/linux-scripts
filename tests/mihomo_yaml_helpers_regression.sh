@@ -35,6 +35,8 @@ port: 7890 # old http
 proxies:
   - name: local
     port: 1234
+    authentication:
+      - "nested:keep"
 socks-port: 7891
 external-controller: '127.0.0.1:9090'
 secret: oldsecret
@@ -57,5 +59,51 @@ grep -qx "socks-port: 8889" "$CONFIG_FILE" || fail "socks-port was not updated"
 grep -qx "external-controller: 127.0.0.1:8890" "$CONFIG_FILE" || fail "controller was not updated"
 grep -qx "secret: newsecret" "$CONFIG_FILE" || fail "secret was not updated"
 grep -qx "    port: 1234" "$CONFIG_FILE" || fail "nested port should not be touched"
+
+write_proxy_auth_credentials "alice" "p:a'ss"
+
+grep -qx "authentication:" "$CONFIG_FILE" || fail "top-level authentication was not added"
+grep -qx "  - 'alice:p:a''ss'" "$CONFIG_FILE" || fail "authentication entry was not quoted safely"
+grep -qx "    authentication:" "$CONFIG_FILE" || fail "nested authentication should not be removed"
+grep -qx "      - \"nested:keep\"" "$CONFIG_FILE" || fail "nested authentication entry should not be touched"
+[[ "$(get_proxy_auth_entry)" == "alice:p:a'ss" ]] || fail "proxy auth readback failed"
+[[ "$(get_proxy_auth_user)" == "alice" ]] || fail "proxy auth user readback failed"
+
+cat >> "$CONFIG_FILE" <<'EOF'
+skip-auth-prefixes:
+  - 127.0.0.1/8
+EOF
+
+create_subscription_config >/dev/null
+
+grep -qx "authentication:" "$CONFIG_FILE" || fail "subscription config should preserve authentication"
+grep -qx "  - 'alice:p:a''ss'" "$CONFIG_FILE" || fail "subscription config should preserve authentication entry"
+grep -qx "skip-auth-prefixes:" "$CONFIG_FILE" || fail "subscription config should preserve skip-auth-prefixes"
+grep -qx "  - 127.0.0.1/8" "$CONFIG_FILE" || fail "subscription config should preserve skip-auth-prefixes entry"
+[[ "$(get_proxy_auth_entry)" == "alice:p:a'ss" ]] || fail "subscription auth readback failed"
+
+clear_proxy_auth_config
+
+! grep -qx "authentication:" "$CONFIG_FILE" || fail "top-level authentication should be cleared"
+grep -qx "skip-auth-prefixes:" "$CONFIG_FILE" || fail "clearing authentication should not remove skip-auth-prefixes"
+
+check_root() {
+  return 0
+}
+
+test_and_restart() {
+  return 0
+}
+
+auth_output="$(manage_proxy_auth set bob secret-pass 2>&1)"
+[[ "$auth_output" != *"secret-pass"* ]] || fail "auth command output should not leak password"
+[[ "$(get_proxy_auth_entry)" == "bob:secret-pass" ]] || fail "auth command set failed"
+
+manage_proxy_auth off >/dev/null
+! grep -qx "authentication:" "$CONFIG_FILE" || fail "auth command off should clear top-level authentication"
+
+write_proxy_auth_credentials "hashuser" "p #ss"
+[[ "$(get_proxy_auth_entry)" == "hashuser:p #ss" ]] || fail "quoted auth with hash should round-trip"
+clear_proxy_auth_config
 
 echo "ok - mihomo yaml helper fallback"

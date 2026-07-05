@@ -235,7 +235,7 @@ cf enable myweb
 
 ## mihomo.sh
 
-Mihomo Linux 一体化管理脚本。支持核心安装、systemd 服务、订阅导入、自动代理组、前端切换、端口修改、SOCKS5 多端口组和 `Country.mmdb` 修复。
+Mihomo Linux 一体化管理脚本。支持核心安装、systemd 服务、订阅导入、自动代理组、前端切换、端口修改、HTTP / SOCKS5 共用代理认证、SOCKS5 多端口组和 `Country.mmdb` 修复。
 
 默认值：
 
@@ -276,6 +276,10 @@ sudo bash mihomo.sh groups
 sudo bash mihomo.sh port 8899
 sudo bash mihomo.sh http 7890
 sudo bash mihomo.sh socks 7891
+sudo bash mihomo.sh auth set <用户名>
+sudo bash mihomo.sh auth <用户名> <密码>
+sudo bash mihomo.sh auth status
+sudo bash mihomo.sh auth off
 sudo bash mihomo.sh frontend metacubexd
 sudo bash mihomo.sh frontend zashboard
 sudo bash mihomo.sh frontend-info
@@ -295,6 +299,8 @@ sudo bash mihomo.sh socks-group off
 mihomoctl status
 mihomoctl sub <订阅链接>
 mihomoctl port 8899
+mihomoctl auth status
+mihomoctl auth set <用户名>
 mihomoctl frontend zashboard
 ```
 
@@ -314,6 +320,7 @@ clashuninstall
 
 - 出于安全考虑，Web 管理 API 默认只绑定 `127.0.0.1`，远程访问建议使用 SSH 隧道。
 - 如确需开放到局域网或公网，需要显式执行 `sudo bash mihomo.sh port 0.0.0.0:9090`，并在 Web 面板中填写 `/etc/mihomo/config.yaml` 的 `secret`。
+- `sudo bash mihomo.sh auth set <用户名>` 会隐藏输入密码；HTTP 和 SOCKS5 共用同一组顶层 `authentication` 代理认证，`status` 不输出明文密码。
 - 默认配置包含 `allow-lan: true`，HTTP / SOCKS 代理端口和 DNS 监听面需要结合防火墙确认；SOCKS5 多端口组启用后会监听 `0.0.0.0`。
 
 ## astr.sh

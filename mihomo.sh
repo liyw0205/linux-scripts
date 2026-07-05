@@ -7,6 +7,7 @@
 # 修改 external-controller 管理端口
 # 修改 HTTP 代理端口 port
 # 修改 SOCKS5 代理端口 socks-port
+# 设置 HTTP / SOCKS5 共用代理认证
 # 启用/移除 SOCKS5 多端口组
 # 自动代理组：AUTO / FALLBACK / LOAD-BALANCE
 # Country.mmdb 自动检测、下载、修复
@@ -90,6 +91,31 @@ yaml_value_is_integer() {
         port|socks-port) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+yaml_quote_string() {
+    local value="${1:-}"
+    value="${value//\'/\'\'}"
+    printf "'%s'" "$value"
+}
+
+yaml_unquote_string() {
+    local value="${1:-}"
+    value="$(printf '%s' "$value" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+    case "$value" in
+        \'*\')
+            value="${value#\'}"
+            value="${value%\'}"
+            value="${value//\'\'/\'}"
+            ;;
+        \"*\")
+            value="${value#\"}"
+            value="${value%\"}"
+            ;;
+    esac
+
+    printf '%s\n' "$value"
 }
 
 detect_os() {
@@ -348,6 +374,175 @@ set_config_value() {
 
     mv "$tmp_file" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+get_top_level_yaml_block() {
+    local key="$1"
+
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    awk -v key="$key" '
+        $0 ~ ("^" key ":[[:space:]]*") {
+            in_block = 1
+            print
+            next
+        }
+        in_block {
+            if ($0 ~ /^[^[:space:]#]/) exit
+            print
+        }
+    ' "$CONFIG_FILE"
+}
+
+remove_top_level_yaml_block() {
+    local key="$1"
+    local tmp_file
+
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+    awk -v key="$key" '
+        $0 ~ ("^" key ":[[:space:]]*") {
+            in_block = 1
+            next
+        }
+        in_block {
+            if ($0 ~ /^[^[:space:]#]/) {
+                in_block = 0
+                print
+            }
+            next
+        }
+        { print }
+    ' "$CONFIG_FILE" > "$tmp_file"
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+get_proxy_auth_entry() {
+    local value
+
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    if has_mikefarah_yq; then
+        value="$(yq -r '.authentication[0] // ""' "$CONFIG_FILE" 2>/dev/null || true)"
+        if [ -n "${value:-}" ] && [ "$value" != "null" ]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    fi
+
+    value="$(
+        awk '
+            /^authentication:[[:space:]]*/ {
+                in_auth = 1
+                value = $0
+                sub(/^authentication:[[:space:]]*/, "", value)
+                if (value !~ /^["\047]/) sub(/[[:space:]]+#.*$/, "", value)
+                if (value != "" && value != "[]") {
+                    print value
+                    exit
+                }
+                next
+            }
+            in_auth {
+                if ($0 ~ /^[^[:space:]#]/) exit
+                if ($0 ~ /^[[:space:]]*-[[:space:]]*/) {
+                    value = $0
+                    sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+                    if (value !~ /^["\047]/) sub(/[[:space:]]+#.*$/, "", value)
+                    print value
+                    exit
+                }
+            }
+        ' "$CONFIG_FILE"
+    )"
+
+    [ -n "${value:-}" ] || return 0
+    yaml_unquote_string "$value"
+}
+
+get_proxy_auth_user() {
+    local entry
+    entry="$(get_proxy_auth_entry)"
+    [ -n "${entry:-}" ] || return 0
+    printf '%s\n' "${entry%%:*}"
+}
+
+proxy_auth_enabled() {
+    [ -n "$(get_proxy_auth_entry)" ]
+}
+
+validate_proxy_auth_credentials() {
+    local username="$1"
+    local password="$2"
+
+    if [ -z "$username" ]; then
+        log_error "代理认证用户名不能为空"
+        exit 1
+    fi
+
+    if [ -z "$password" ]; then
+        log_error "代理认证密码不能为空"
+        exit 1
+    fi
+
+    if [[ "$username" == *:* ]]; then
+        log_error "代理认证用户名不能包含冒号"
+        exit 1
+    fi
+
+    if [[ "$username$password" == *$'\n'* || "$username$password" == *$'\r'* ]]; then
+        log_error "代理认证用户名和密码不能包含换行"
+        exit 1
+    fi
+}
+
+write_proxy_auth_credentials() {
+    local username="$1"
+    local password="$2"
+    local quoted_auth
+    local tmp_file
+
+    validate_proxy_auth_credentials "$username" "$password"
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    remove_top_level_yaml_block "authentication"
+
+    quoted_auth="$(yaml_quote_string "${username}:${password}")"
+    tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        awk -v quoted_auth="$quoted_auth" '
+            BEGIN { inserted = 0 }
+            {
+                print
+                if (inserted == 0 && $0 ~ /^socks-port:[[:space:]]*/) {
+                    print "authentication:"
+                    print "  - " quoted_auth
+                    inserted = 1
+                }
+            }
+            END {
+                if (inserted == 0) {
+                    print "authentication:"
+                    print "  - " quoted_auth
+                }
+            }
+        ' "$CONFIG_FILE" > "$tmp_file"
+    else
+        {
+            echo "authentication:"
+            echo "  - ${quoted_auth}"
+        } > "$tmp_file"
+    fi
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+}
+
+clear_proxy_auth_config() {
+    remove_top_level_yaml_block "authentication"
 }
 
 generate_controller_secret() {
@@ -842,6 +1037,8 @@ create_subscription_config() {
     local http_port
     local socks_port
     local secret
+    local proxy_auth_block
+    local skip_auth_prefixes_block
 
     controller="$(get_controller_from_config)"
     controller="${controller:-$DEFAULT_CONTROLLER}"
@@ -857,11 +1054,23 @@ create_subscription_config() {
     socks_port="$(get_socks_port)"
     socks_port="${socks_port:-$DEFAULT_SOCKS_PORT}"
 
+    proxy_auth_block="$(get_top_level_yaml_block "authentication")"
+    skip_auth_prefixes_block="$(get_top_level_yaml_block "skip-auth-prefixes")"
+
     backup_file "$CONFIG_FILE"
 
-    cat > "$CONFIG_FILE" <<EOF
+    {
+        cat <<EOF
 port: ${http_port}
 socks-port: ${socks_port}
+EOF
+        if [ -n "${proxy_auth_block:-}" ]; then
+            printf '%s\n' "$proxy_auth_block"
+        fi
+        if [ -n "${skip_auth_prefixes_block:-}" ]; then
+            printf '%s\n' "$skip_auth_prefixes_block"
+        fi
+        cat <<EOF
 allow-lan: true
 mode: rule
 log-level: info
@@ -947,6 +1156,7 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,PROXY
 EOF
+    } > "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
     if [ -f "$SOCKS5_GROUP_STATE" ]; then
@@ -1322,6 +1532,114 @@ change_socks_port() {
 }
 
 # =========================
+# 代理认证
+# =========================
+
+show_proxy_auth_status() {
+    local entry
+    local username
+
+    entry="$(get_proxy_auth_entry)"
+
+    echo ""
+    echo -e "${CYAN}HTTP / SOCKS5 代理认证：${NC}"
+    if [ -n "${entry:-}" ]; then
+        username="${entry%%:*}"
+        echo "  状态：已启用"
+        echo "  用户名：${username}"
+        echo "  密码：已隐藏"
+    else
+        echo "  状态：未启用"
+    fi
+    echo ""
+}
+
+set_proxy_auth() {
+    check_root
+    local username="${1:-}"
+    local password=""
+
+    if [ -z "$username" ]; then
+        echo ""
+        read -r -p "请输入 HTTP / SOCKS5 共用认证用户名：" username
+    fi
+
+    if [ "$#" -ge 2 ]; then
+        password="$2"
+    else
+        read -r -s -p "请输入 HTTP / SOCKS5 共用认证密码：" password
+        echo ""
+    fi
+
+    ensure_config_exists
+    backup_file "$CONFIG_FILE"
+    write_proxy_auth_credentials "$username" "$password"
+
+    log_success "HTTP / SOCKS5 代理认证已启用，用户名：$username，密码已隐藏"
+    test_and_restart
+    show_proxy_auth_status
+}
+
+clear_proxy_auth() {
+    check_root
+    ensure_config_exists
+
+    if ! proxy_auth_enabled; then
+        log_info "HTTP / SOCKS5 代理认证未启用"
+        return 0
+    fi
+
+    backup_file "$CONFIG_FILE"
+    clear_proxy_auth_config
+
+    log_success "HTTP / SOCKS5 代理认证已清除"
+    test_and_restart
+}
+
+manage_proxy_auth() {
+    local action="${1:-status}"
+
+    case "$action" in
+        ""|status|info)
+            show_proxy_auth_status
+            ;;
+        set|on|enable)
+            shift || true
+            set_proxy_auth "$@"
+            ;;
+        off|clear|disable|remove)
+            clear_proxy_auth
+            ;;
+        *)
+            if [ "$#" -ge 2 ]; then
+                set_proxy_auth "$1" "$2"
+            else
+                set_proxy_auth "$1"
+            fi
+            ;;
+    esac
+}
+
+configure_proxy_auth_menu() {
+    check_root
+    local choice
+
+    show_proxy_auth_status
+    echo "  1) 设置或更新认证"
+    echo "  2) 清除认证"
+    echo "  0) 返回"
+    echo ""
+    read -r -p "请选择操作：" choice
+
+    case "$choice" in
+        1) set_proxy_auth ;;
+        2) clear_proxy_auth ;;
+        0|"") return 0 ;;
+        *) log_error "无效选项" ;;
+    esac
+}
+
+# =========================
 # 服务管理
 # =========================
 
@@ -1348,7 +1666,7 @@ test_and_restart() {
 }
 
 show_access_info() {
-    local ip http_port socks_port controller_port controller_host secret
+    local ip http_port socks_port controller_port controller_host secret proxy_auth_user
     ip="$(get_server_ip)"
     http_port="$(get_http_port)"
     socks_port="$(get_socks_port)"
@@ -1366,6 +1684,12 @@ show_access_info() {
     fi
     echo "  HTTP 代理    : http://${ip}:${http_port}"
     echo "  SOCKS5 代理  : ${ip}:${socks_port}"
+    proxy_auth_user="$(get_proxy_auth_user)"
+    if [ -n "${proxy_auth_user:-}" ]; then
+        echo "  代理认证    : 已启用（用户名：${proxy_auth_user}，密码已隐藏）"
+    else
+        echo "  代理认证    : 未启用"
+    fi
     echo ""
 }
 
@@ -1494,15 +1818,16 @@ show_menu() {
     echo "  8) 修改 Web 管理端口 external-controller"
     echo "  9) 修改 HTTP 代理端口 port"
     echo " 10) 修改 SOCKS5 代理端口 socks-port"
-    echo " 11) 切换前端"
-    echo " 12) 查看前端信息"
-    echo " 13) 测试配置"
-    echo " 14) 重新生成自动/均衡代理组"
-    echo " 15) 修复/下载 Country.mmdb"
-    echo " 16) 启用 SOCKS5 多端口组"
-    echo " 17) 移除 SOCKS5 多端口组"
-    echo " 18) 查看 SOCKS5 多端口组状态"
-    echo " 19) 卸载 Mihomo"
+    echo " 11) 设置 HTTP / SOCKS5 代理认证"
+    echo " 12) 切换前端"
+    echo " 13) 查看前端信息"
+    echo " 14) 测试配置"
+    echo " 15) 重新生成自动/均衡代理组"
+    echo " 16) 修复/下载 Country.mmdb"
+    echo " 17) 启用 SOCKS5 多端口组"
+    echo " 18) 移除 SOCKS5 多端口组"
+    echo " 19) 查看 SOCKS5 多端口组状态"
+    echo " 20) 卸载 Mihomo"
     echo "  0) 退出"
     echo ""
 }
@@ -1522,15 +1847,16 @@ interactive_menu() {
             8) change_controller_port ;;
             9) change_http_port ;;
             10) change_socks_port ;;
-            11) install_frontend ;;
-            12) show_frontend_info ;;
-            13) test_config ;;
-            14) regenerate_proxy_groups ;;
-            15) repair_mmdb ;;
-            16) enable_socks5_group ;;
-            17) disable_socks5_group ;;
-            18) show_socks5_group_status ;;
-            19) uninstall_mihomo ;;
+            11) configure_proxy_auth_menu ;;
+            12) install_frontend ;;
+            13) show_frontend_info ;;
+            14) test_config ;;
+            15) regenerate_proxy_groups ;;
+            16) repair_mmdb ;;
+            17) enable_socks5_group ;;
+            18) disable_socks5_group ;;
+            19) show_socks5_group_status ;;
+            20) uninstall_mihomo ;;
             0) exit 0 ;;
             *) log_error "无效选项" ;;
         esac
@@ -1568,6 +1894,12 @@ Mihomo 一体化管理脚本
   http [端口]                 修改 HTTP 代理端口 port
   socks [端口]                修改 SOCKS5 代理端口 socks-port
 
+代理认证：
+  auth [用户名] [密码]        设置 HTTP / SOCKS5 共用认证
+  auth set <用户名> [密码]    设置 HTTP / SOCKS5 共用认证
+  auth off                    清除 HTTP / SOCKS5 代理认证
+  auth status                 查看代理认证状态
+
 SOCKS5 多端口组：
   socks-group on [数量]       启用多个 SOCKS5 独立端口
   socks-group off             移除新增的 SOCKS5 独立端口
@@ -1590,6 +1922,9 @@ SOCKS5 多端口组：
   mihomoctl port 8899
   mihomoctl http 7890
   mihomoctl socks 7891
+  mihomoctl auth status
+  mihomoctl auth set user
+  mihomoctl auth off
   mihomoctl socks-group on 10
   mihomoctl socks-group off
   mihomoctl mmdb
@@ -1699,6 +2034,10 @@ main() {
         port|controller|change-port) change_controller_port "${2:-}" ;;
         http|http-port|change-http) change_http_port "${2:-}" ;;
         socks|socks-port|change-socks) change_socks_port "${2:-}" ;;
+        auth|proxy-auth|authentication)
+            shift
+            manage_proxy_auth "$@"
+            ;;
 
         socks-group|socks5-group|socket5-group)
             case "${2:-}" in

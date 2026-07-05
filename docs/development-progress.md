@@ -532,7 +532,47 @@
 - 未执行真实 AstrBot 安装、真实 `git pull` 外部仓库更新、screen 启停或服务重启。
 - `update` 复用现有 venv 原地安装依赖；若 pip 在包级别部分升级后失败，脚本只能回退本次代码更新，不能完整还原虚拟环境包状态。需要完整 venv 原子替换时继续使用 `patch`。
 
-## 阶段 13 预期
+## 阶段 13：Mihomo HTTP/SOCKS5 共用代理认证
+
+日期：2026-07-06
+
+### 已完成
+
+- 使用主代理 + 1 个子代理完成 Mihomo 入站代理认证方案审查。
+- `mihomo.sh`
+  - 新增顶层 `authentication` 代理认证管理，HTTP 和 SOCKS5 共用同一组用户名/密码。
+  - 新增 `auth|proxy-auth|authentication` 命令：
+    - `auth set <用户名> [密码]` 设置认证，省略密码时隐藏输入。
+    - `auth <用户名> <密码>` 兼容直接设置。
+    - `auth status` 查看状态，不输出明文密码。
+    - `auth off` 清除认证。
+  - 新增交互菜单入口“设置 HTTP / SOCKS5 代理认证”。
+  - `show_access_info` 显示代理认证启用状态和用户名，密码始终脱敏。
+  - 新增 YAML 单引号 quote/unquote 和顶层 block helper，只操作 column 0 的 `authentication`，避免误删嵌套字段。
+  - `create_subscription_config` 重建订阅配置时保留现有 `authentication` 和 `skip-auth-prefixes`，避免 `sub` / `groups` 丢认证。
+  - SOCKS5 多端口组继续不写 `users: []`，保持继承全局认证。
+- `tests/mihomo_yaml_helpers_regression.sh`
+  - 覆盖认证写入、单引号和 `#` 字符安全 round-trip。
+  - 覆盖只删除顶层 `authentication`，不触碰嵌套 `authentication`。
+  - 覆盖订阅配置重建保留认证和 `skip-auth-prefixes`。
+  - 覆盖命令层设置/清除认证且输出不泄露密码。
+- README 同步 Mihomo 认证命令和行为说明。
+
+### 验证结果
+
+- `bash -n mihomo.sh tests/mihomo_yaml_helpers_regression.sh` 通过。
+- `bash tests/mihomo_yaml_helpers_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 Mihomo 安装、配置测试、systemd 重启或外部下载。
+- 命令行形式 `auth <用户名> <密码>` 便于自动化，但密码会进入 shell history；人工使用建议 `auth set <用户名>` 后隐藏输入密码。
+
+## 阶段 14 预期
 
 继续做运行时一致性和测试覆盖收敛：
 
