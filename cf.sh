@@ -674,13 +674,31 @@ delete_cmd() {
         stop_local_tunnel_runtime "$name"
 
         if delete_tunnel_with_retry "$tunnel_id" "$name"; then
+            local cleanup_failed=0
             if [[ -f "$svc_file" ]]; then
-                run_root rm -f "$svc_file"
-                run_root systemctl daemon-reload
+                if ! run_root rm -f "$svc_file"; then
+                    error "远端已删除，但本地 service 删除失败: $svc_file"
+                    cleanup_failed=1
+                fi
+                if ! run_root systemctl daemon-reload; then
+                    error "远端已删除，但 systemd daemon-reload 失败"
+                    cleanup_failed=1
+                fi
             fi
 
-            [[ -f "$cfg" ]] && rm -f "$cfg"
-            [[ -n "$cred" && -f "$cred" ]] && rm -f "$cred"
+            if [[ -f "$cfg" ]] && ! rm -f "$cfg"; then
+                error "远端已删除，但本地配置删除失败: $cfg"
+                cleanup_failed=1
+            fi
+            if [[ -n "$cred" && -f "$cred" ]] && ! rm -f "$cred"; then
+                error "远端已删除，但 credentials 删除失败: $cred"
+                cleanup_failed=1
+            fi
+            if [[ "$cleanup_failed" -ne 0 ]]; then
+                error "恢复建议: 手动删除残留文件后执行 systemctl daemon-reload"
+                error "残留检查: $cfg $svc_file ${cred:-<none>}"
+                abort "远端已删除，本地清理不完整，请按提示人工恢复: $name"
+            fi
             ui_print "已删除隧道: $name"
         else
             abort "删除失败，已保留本地配置以便重试: $name"

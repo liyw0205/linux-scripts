@@ -700,7 +700,34 @@
 - 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
 - 未执行真实 cloudflared 远程创建/删除、真实 systemd 启停或外部服务部署。
 
-## 阶段 18 预期
+## 阶段 18：Cloudflare delete 本地清理失败提示
+
+日期：2026-07-06
+
+### 已完成
+
+- `cf.sh`
+  - `delete` 在远端 tunnel 删除成功后，本地 service、yml、credentials 或 `systemctl daemon-reload` 清理失败时，不再由 `set -e` 直接中断。
+  - 本地清理改为逐项收集失败；能删除的本地文件继续删除，失败项明确输出路径。
+  - 如果清理不完整，明确提示远端已经删除、本地清理不完整，并给出“手动删除残留文件后执行 `systemctl daemon-reload`”的恢复建议。
+- `tests/cf_command_regression.sh`
+  - fake `rm` 支持模拟 service 文件删除失败。
+  - 覆盖远端删除成功、本地 service 删除失败时的提示内容、残留 service 保留、yml/credentials 仍尽量清理。
+
+### 验证结果
+
+- `bash -n cf.sh tests/cf_command_regression.sh` 通过。
+- `bash tests/cf_command_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 cloudflared 远程删除、真实 systemd 启停或外部服务部署。
+
+## 阶段 19 预期
 
 继续做低风险维护收敛：
 

@@ -23,6 +23,20 @@ exec "$@"
 EOF
   chmod +x "$bin/sudo"
 
+  cat > "$bin/rm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_RM_FAIL_SERVICE_NAME:-}" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == "${SERVICE_DIR:?}/cf-tunnel-${FAKE_RM_FAIL_SERVICE_NAME}.service" ]]; then
+      exit 1
+    fi
+  done
+fi
+exec "${REAL_RM:?}" "$@"
+EOF
+  chmod +x "$bin/rm"
+
   cat > "$bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -114,6 +128,7 @@ run_cf() {
     SERVICE_DIR="$TMP_DIR/systemd" \
     TMPDIR="$TMP_DIR" \
     REAL_MKTEMP="$(command -v mktemp)" \
+    REAL_RM="$(command -v rm)" \
     FAKE_TUNNEL_ID="$TUNNEL_ID" \
     FAKE_CLOUDFLARED_CREATE_ID="44444444-4444-4444-4444-444444444444" \
     FAKE_CLOUDFLARED_CREATE_MARKER="$TMP_DIR/cloudflared-created.marker" \
@@ -180,6 +195,19 @@ run_cf bash "$ROOT_DIR/cf.sh" delete demo >/dev/null
 [[ ! -e "$TMP_DIR/home/${TUNNEL_ID}.json" ]] || fail "delete success should remove credentials"
 grep -q '^daemon-reload$' "$TMP_DIR/systemctl.log" || fail "delete success should daemon-reload"
 assert_no_real_paths_used
+
+write_standard_config "http://127.0.0.1:7000"
+delete_output=""
+if delete_output="$(run_cf env FAKE_RM_FAIL_SERVICE_NAME=demo bash "$ROOT_DIR/cf.sh" delete demo 2>&1)"; then
+  fail "delete should fail when remote delete succeeds but local service cleanup fails"
+fi
+printf '%s\n' "$delete_output" | grep -q "远端已删除，但本地 service 删除失败: $TMP_DIR/systemd/cf-tunnel-demo.service" || fail "delete cleanup failure should report service cleanup failure"
+printf '%s\n' "$delete_output" | grep -q "恢复建议: 手动删除残留文件后执行 systemctl daemon-reload" || fail "delete cleanup failure should suggest manual recovery"
+printf '%s\n' "$delete_output" | grep -q "远端已删除，本地清理不完整" || fail "delete cleanup failure should report incomplete local cleanup"
+[[ -f "$TMP_DIR/systemd/cf-tunnel-demo.service" ]] || fail "failed service cleanup should leave service for manual recovery"
+[[ ! -e "$TMP_DIR/home/demo.yml" ]] || fail "delete cleanup failure should still remove yml when possible"
+[[ ! -e "$TMP_DIR/home/${TUNNEL_ID}.json" ]] || fail "delete cleanup failure should still remove credentials when possible"
+grep -q "tunnel delete $TUNNEL_ID" "$TMP_DIR/cloudflared.log" || fail "delete cleanup failure should have deleted remote first"
 
 write_standard_config "http://127.0.0.1:7100"
 rename_output=""
