@@ -27,6 +27,7 @@ usage() {
   astr status                 查看状态
   astr log                    查看并跟随日志
   astr install                安装依赖、克隆仓库并创建虚拟环境
+  astr update                 git pull 更新代码并在虚拟环境中刷新依赖
   astr patch                  更新 AstrBot 代码并刷新 Python 依赖
   astr deploy                 将本脚本安装到系统命令 (默认 /usr/local/bin/astr)
 
@@ -95,10 +96,17 @@ install_requirements() {
     local venv_dir="$1"
     local requirements_file="$2"
     local python_bin="${venv_dir}/bin/python"
+    local activate_file="${venv_dir}/bin/activate"
 
     [[ -x "${python_bin}" ]] || return 1
-    "${python_bin}" -m pip install -U pip
-    "${python_bin}" -m pip install -r "${requirements_file}"
+    [[ -f "${activate_file}" ]] || return 1
+    [[ -f "${requirements_file}" ]] || return 1
+    (
+        # shellcheck disable=SC1090
+        source "${activate_file}"
+        python -m pip install -U pip
+        python -m pip install -r "${requirements_file}"
+    )
 }
 
 install_astr() {
@@ -123,7 +131,7 @@ install_astr() {
     if [[ -d "${APP_DIR}/.git" ]]; then
         if [[ -x "${VENV_DIR}/bin/python" && -x "${VENV_DIR}/bin/pip" ]]; then
             echo "检测到已有 AstrBot 安装: ${APP_DIR}"
-            echo "如需更新请执行: astr patch"
+            echo "如需更新请执行: astr update"
             return 0
         fi
         if [[ ! -f "${APP_DIR}/requirements.txt" ]]; then
@@ -292,6 +300,45 @@ patch_astr() {
     fi
     [[ -n "${backup_venv}" ]] && rm -rf "${backup_venv}"
     echo "AstrBot patch 完成"
+}
+
+update_astr() {
+    local old_head new_head supervisor_pid app_pid
+
+    if [[ ! -d "${APP_DIR}/.git" ]]; then
+        echo "未找到 Git 仓库: ${APP_DIR}，请先执行 astr install" >&2
+        return 1
+    fi
+    if [[ ! -x "${VENV_DIR}/bin/python" || ! -f "${VENV_DIR}/bin/activate" ]]; then
+        echo "未找到虚拟环境: ${VENV_DIR}，请先执行 astr install" >&2
+        return 1
+    fi
+    if ! git -C "${APP_DIR}" diff --quiet || ! git -C "${APP_DIR}" diff --cached --quiet; then
+        echo "工作区存在未提交修改，拒绝自动 update: ${APP_DIR}" >&2
+        return 1
+    fi
+
+    echo "更新 AstrBot 代码..."
+    old_head="$(git -C "${APP_DIR}" rev-parse HEAD)" || return 1
+    if ! git -C "${APP_DIR}" pull --ff-only; then
+        return 1
+    fi
+    new_head="$(git -C "${APP_DIR}" rev-parse HEAD)" || return 1
+
+    echo "进入虚拟环境并安装依赖: ${VENV_DIR}"
+    if ! install_requirements "${VENV_DIR}" "${APP_DIR}/requirements.txt"; then
+        if [[ "${new_head}" != "${old_head}" ]]; then
+            git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
+        fi
+        return 1
+    fi
+
+    supervisor_pid="$(read_supervisor_pid || true)"
+    app_pid="$(read_app_pid || true)"
+    if is_running "${supervisor_pid}" || is_running "${app_pid}"; then
+        echo "AstrBot 已更新；当前进程仍在运行，建议执行 astr restart 使更新生效"
+    fi
+    echo "AstrBot update 完成"
 }
 
 deploy_astr() {
@@ -624,6 +671,9 @@ main() {
             ;;
         install)
             install_astr
+            ;;
+        update)
+            update_astr
             ;;
         patch)
             patch_astr

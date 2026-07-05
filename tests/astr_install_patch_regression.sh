@@ -34,6 +34,9 @@ if [[ "${1:-}" == "-m" && "${2:-}" == "venv" ]]; then
 set -euo pipefail
 if [[ "${1:-}" == "-m" && "${2:-}" == "pip" ]]; then
     printf '%s\n' "$*" >> "${FAKE_ASTR_LOG:?}"
+    if [[ "${FAKE_ASTR_REQUIRE_ACTIVATED:-0}" == "1" && "${FAKE_ASTR_ACTIVATED:-0}" != "1" ]]; then
+        exit 9
+    fi
     if [[ "${FAKE_ASTR_PIP_FAIL:-0}" == "1" ]]; then
         exit 1
     fi
@@ -45,6 +48,10 @@ PYEOF
     chmod +x "$venv/bin/python"
     printf '#!/usr/bin/env sh\nexit 0\n' > "$venv/bin/pip"
     chmod +x "$venv/bin/pip"
+    cat > "$venv/bin/activate" <<'ACTEOF'
+export PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
+export FAKE_ASTR_ACTIVATED=1
+ACTEOF
     exit 0
 fi
 exit 1
@@ -142,4 +149,19 @@ fi
 grep -qx "old venv" "$VENV_DIR/marker" || fail "failed patch should preserve old venv"
 assert_no_astr_temp "$TMP_DIR/success"
 
-echo "ok - astr install and patch preserve artifacts on failure"
+FAKE_ASTR_REQUIRE_ACTIVATED=1 update_astr >/dev/null
+grep -qx "new-requirement" "$APP_DIR/requirements.txt" || fail "update should git pull latest requirements"
+grep -qx "old venv" "$VENV_DIR/marker" || fail "update should reuse existing venv"
+grep -q -- "-r $APP_DIR/requirements.txt" "$FAKE_ASTR_LOG" || fail "update should install requirements from app dir"
+
+update_head="$(git -C "$APP_DIR" rev-parse HEAD)"
+printf '%s\n' "newer-requirement" > "$repo/requirements.txt"
+git -C "$repo" add requirements.txt
+git -C "$repo" commit -q -m "second update"
+if FAKE_ASTR_REQUIRE_ACTIVATED=1 FAKE_ASTR_PIP_FAIL=1 update_astr >/dev/null 2>/dev/null; then
+    fail "update should fail when dependency install fails"
+fi
+[[ "$(git -C "$APP_DIR" rev-parse HEAD)" == "$update_head" ]] || fail "failed update should roll back git HEAD"
+grep -qx "new-requirement" "$APP_DIR/requirements.txt" || fail "failed update should restore previous code"
+
+echo "ok - astr install update and patch preserve artifacts"

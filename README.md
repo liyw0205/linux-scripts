@@ -333,6 +333,7 @@ AstrBot 单文件管理脚本，默认管理 `/root/AstrBot` 项目和 `/root/my
 ```bash
 bash astr.sh deploy
 astr install
+astr update
 astr patch
 astr start
 astr stop
@@ -345,13 +346,15 @@ astr log
 
 ```bash
 bash astr.sh install
+bash astr.sh update
 bash astr.sh start
 ```
 
 说明：
 
 - 新安装会先在临时目录完成 git clone、venv 创建和依赖安装，全部成功后再发布到最终目录。
-- `patch` 只接受干净工作区和 fast-forward 更新，并先构建新 venv；依赖安装失败时保留旧代码和旧 venv。
+- `update` 会在应用目录执行 `git pull --ff-only`，然后进入现有虚拟环境刷新依赖；依赖安装失败时会回退本次代码更新。
+- `patch` 保留为更严格的 staging 更新路径：只接受干净工作区和 fast-forward 更新，并先构建新 venv；依赖安装失败时保留旧代码和旧 venv。
 
 ## napcat.sh
 
@@ -440,6 +443,7 @@ sudo bash mihomo.sh status
 ```bash
 bash astr.sh deploy
 astr install
+astr update
 astr start
 
 bash napcat.sh deploy

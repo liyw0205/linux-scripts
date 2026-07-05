@@ -499,12 +499,43 @@
 - `astr.sh patch` 仍会在 patch 成功发布 venv 后才切换到新环境；若运行中的进程已加载旧代码，需要用户按需重启服务。
 - `napcat.sh install` 仍执行上游 installer，本阶段只保证 installer 文件下载/发布不污染旧产物，不拦截上游 installer 内部副作用。
 
-## 阶段 12 预期
+## 阶段 12：AstrBot update 命令和运行提示
+
+日期：2026-07-05
+
+### 已完成
+
+- 使用主代理 + 1 个子代理完成 `astr.sh update` 命令设计审查和实现。
+- `astr.sh`
+  - 新增 `update_astr`，面向日常更新：在 `APP_DIR` 执行 `git pull --ff-only`，再进入现有虚拟环境刷新依赖。
+  - `install_requirements` 改为显式 source `${VENV_DIR}/bin/activate` 后执行 `python -m pip`，满足进入虚拟环境安装依赖的行为。
+  - `update_astr` 检查 `.git`、虚拟环境和干净工作区；依赖安装失败时回退本次 `git pull` 带来的 HEAD 变化。
+  - `update_astr` 检测到 supervisor 或 app 正在运行时提示执行 `astr restart` 使更新生效。
+  - `install_astr` 已有完整安装时提示使用 `astr update`。
+  - CLI 增加 `astr update` 分支，`patch` 保留为更严格的 staging 更新路径。
+  - `tests/astr_install_patch_regression.sh` 增加 update 成功、必须进入虚拟环境、依赖失败回退代码的覆盖。
+- README
+  - 常用命令和组合示例加入 `astr update`。
+  - 同步说明 `update` 是 `git pull --ff-only` 后进入现有虚拟环境安装依赖，`patch` 是更严格的 staging 更新路径。
+
+### 验证结果
+
+- `bash -n astr.sh tests/astr_install_patch_regression.sh` 通过。
+- `bash tests/astr_install_patch_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过。
+- 未执行真实 AstrBot 安装、真实 `git pull` 外部仓库更新、screen 启停或服务重启。
+- `update` 复用现有 venv 原地安装依赖；若 pip 在包级别部分升级后失败，脚本只能回退本次代码更新，不能完整还原虚拟环境包状态。需要完整 venv 原子替换时继续使用 `patch`。
+
+## 阶段 13 预期
 
 继续做运行时一致性和测试覆盖收敛：
 
-- `astr.sh`
-  - 评估 `patch_astr` 与运行中 supervisor/app 的协调策略，必要时增加运行中提示或安全重启流程。
 - `napcat.sh`
   - 审查 `start_napcat` / `_run` 的 screen、Xvfb、QQ 子进程清理边界，补充无副作用 fake 进程测试。
 - `cf.sh`
