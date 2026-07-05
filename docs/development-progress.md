@@ -613,13 +613,96 @@
 - 未执行真实订阅网络下载、Mihomo 配置测试、systemd 重启或外部服务部署。
 - 命令行形式 `sub <订阅链接>` 便于自动化，但订阅链接会进入 shell history；人工使用建议执行 `sub` 后隐藏输入。
 
-## 阶段 15 预期
+## 阶段 15：运行时清理和恢复提示收敛
 
-继续做运行时一致性和测试覆盖收敛：
+日期：2026-07-06
 
-- `napcat.sh`
-  - 审查 `start_napcat` / `_run` 的 screen、Xvfb、QQ 子进程清理边界，补充无副作用 fake 进程测试。
+### 已完成
+
 - `cf.sh`
-  - 复查 `rename` / `sync` 的远端成功、本地失败场景是否需要更明确的人工恢复提示。
-- 测试工具链
-  - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。
+  - `rename` 在远端重命名成功但本地 yml/service 写入失败时，明确提示远端已经改名、旧本地配置仍保留、旧服务已停止/禁用，以及后续 `cf sync`、`cf set-url`、必要时 `cf enable` 的人工恢复步骤。
+  - `sync` 在单个远端隧道本地写入失败时，明确提示远端未修改、失败项已尝试回滚、前序已同步项不会自动回滚，并清理临时列表后退出。
+  - `tests/cf_command_regression.sh` 增加 fake `rename` 和 `sync` 本地写入失败场景，覆盖提示内容、回滚结果和临时文件清理。
+- `napcat.sh`
+  - 新增 PID 退出等待和定向终止 helper，避免停止时误杀当前调用者所在进程组。
+  - `_run` 停止 QQ / Xvfb 时先 TERM、再按需 KILL，并对 QQ 子进程树做定向清理。
+  - `stop_napcat` 的 TERM/KILL 等待窗口改为可通过环境变量调整，默认更快升级，避免 QQ 忽略 TERM 时长时间卡住。
+  - `tests/napcat_runtime_regression.sh` 增加 fake Xvfb/QQ 无副作用运行时测试，覆盖 QQ 忽略 TERM 时 `stop_napcat` 能及时停止 `_run`、QQ 子进程和 PID/stop 文件清理。
+  - `scripts/test.sh` 接入新增 NapCat runtime 回归测试。
+
+### 验证结果
+
+- `bash tests/cf_command_regression.sh` 通过。
+- `bash tests/cf_local_writes_regression.sh` 通过。
+- `bash tests/napcat_runtime_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 cloudflared 远程操作、真实 systemd 启停、真实 NapCat/QQ/Xvfb 运行或外部服务部署。
+
+## 阶段 16：WebDAV mount remote 配置失败恢复
+
+日期：2026-07-06
+
+### 已完成
+
+- `mount_webdav.sh`
+  - `config_remote` 不再先删除真实同名 remote。
+  - 新配置会先写入临时 rclone config，并在 probe remote 上完成连接测试；probe 失败时真实 remote 不被修改。
+  - probe 成功后再检查真实配置中是否存在同名 remote：存在则 `rclone config update`，不存在才 `config create`。
+  - 最终 update 失败时提示“未主动删除旧 remote”，并给出真实配置文件路径。
+  - 探测临时配置在成功、probe 失败和最终提交失败路径都会清理。
+- `tests/mount_webdav_regression.sh`
+  - fake `rclone` 覆盖 probe config、真实 update、真实 create、probe lsd 失败和最终 update 失败。
+  - 覆盖不再执行 `config delete`、probe 失败不触碰真实 remote、临时配置清理。
+
+### 验证结果
+
+- `bash -n mount_webdav.sh tests/mount_webdav_regression.sh` 通过。
+- `bash tests/mount_webdav_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 rclone WebDAV 配置、真实 mount、真实 systemd 启停或外部服务部署。
+- `rclone config update` 内部若部分写入后失败，脚本只能保证不主动 delete 旧 remote，不能证明 rclone 内部完全无副作用。
+
+## 阶段 17：Cloudflare create 本地失败恢复提示
+
+日期：2026-07-06
+
+### 已完成
+
+- `cf.sh`
+  - `create` 在远端 tunnel 创建成功但本地 yml/service 写入失败时，明确提示远端 tunnel 已经存在、远端 ID、本地文件已尝试回滚。
+  - 恢复建议明确为：修复本地写入/权限问题后执行 `cf sync`；如果不保留远端 tunnel，则执行 `cf delete <隧道名>`。
+- `tests/cf_command_regression.sh`
+  - fake `cloudflared` 支持 `tunnel create` 后在 `tunnel list` 中暴露新 tunnel，模拟真实创建后的查询流程。
+  - 覆盖 `create` 远端成功、本地 service 写入失败时的提示内容和本地回滚结果。
+
+### 验证结果
+
+- `bash -n cf.sh tests/cf_command_regression.sh` 通过。
+- `bash tests/cf_command_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 cloudflared 远程创建/删除、真实 systemd 启停或外部服务部署。
+
+## 阶段 18 预期
+
+继续做低风险维护收敛：
+
+- 视环境补齐 `shellcheck`、`shfmt`、`bats-core` 可选工具链，或继续保持 fallback。
+- 继续审查各脚本的真实服务边界提示，优先补足失败后人工恢复说明和无副作用 fake 回归测试。

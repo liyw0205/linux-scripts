@@ -72,10 +72,22 @@ if [[ "${1:-}" == "--config" ]]; then
   case "${1:-}" in
     config)
       case "${2:-}" in
-        delete) exit 0 ;;
+        delete)
+          printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-delete.args"
+          exit 0
+          ;;
         create)
+          if [[ "$conf" == "${FAKE_MOUNT_ROOT:?}/home/alice/.config/rclone/rclone.conf" ]]; then
+            printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-create.args"
+          else
+            printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-probe-create.args"
+          fi
+          exit 0
+          ;;
+        update)
           [[ "$conf" == "${FAKE_MOUNT_ROOT:?}/home/alice/.config/rclone/rclone.conf" ]] || exit 3
-          printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-create.args"
+          printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-update.args"
+          [[ "${FAKE_RCLONE_FINAL_UPDATE_FAIL:-0}" == "1" ]] && exit 4
           exit 0
           ;;
       esac
@@ -88,6 +100,9 @@ if [[ "${1:-}" == "--config" ]]; then
       exit 0
       ;;
     lsd)
+      if [[ "${FAKE_RCLONE_PROBE_LSD_FAIL:-0}" == "1" && "$conf" != "${FAKE_MOUNT_ROOT:?}/home/alice/.config/rclone/rclone.conf" ]]; then
+        exit 5
+      fi
       exit 0
       ;;
   esac
@@ -155,6 +170,7 @@ export FUSE_DEVICE="$TMP_DIR/dev/fuse"
 export FUSE_CONF="$TMP_DIR/etc/fuse.conf"
 export FUSERMOUNT_BIN="$TMP_DIR/bin/fusermount3"
 export FUSERMOUNT_FALLBACK_BIN="$TMP_DIR/bin/missing-fusermount"
+export TMPDIR="$TMP_DIR"
 touch "$FUSE_DEVICE"
 
 # shellcheck disable=SC1090
@@ -209,11 +225,59 @@ printf '%s\n%s\n%s\n%s\n' \
   "alice" \
   "secret" | config_remote >/dev/null
 
-grep -q "rclone|--config $TMP_DIR/home/alice/.config/rclone/rclone.conf config create webdav_remote webdav" "$TMP_DIR/calls.log" || fail "config_remote should create remote with sudo user's config"
-grep -q "vendor=other" "$TMP_DIR/rclone-create.args" || fail "default vendor should be other"
-grep -q "pass=obscured-pass" "$TMP_DIR/rclone-create.args" || fail "password should be obscured"
+grep -q "rclone|--config $TMP_DIR/mount-webdav-rclone\\.[^ ]* config create webdav_remote_probe_" "$TMP_DIR/calls.log" || fail "config_remote should probe with temporary config"
+grep -q "rclone|--config $TMP_DIR/home/alice/.config/rclone/rclone.conf config update webdav_remote" "$TMP_DIR/calls.log" || fail "config_remote should update existing remote with sudo user's config"
+grep -q "vendor=other" "$TMP_DIR/rclone-update.args" || fail "default vendor should be other"
+grep -q "pass=obscured-pass" "$TMP_DIR/rclone-update.args" || fail "password should be obscured"
+! grep -q "config delete webdav_remote" "$TMP_DIR/calls.log" || fail "config_remote should not delete existing remote"
+if find "$TMP_DIR" -maxdepth 1 -name 'mount-webdav-rclone.*' -print -quit | grep -q .; then
+  fail "config_remote should remove probe config"
+fi
 ! grep -q "rclone|mount" "$TMP_DIR/calls.log" || fail "config_remote should not mount"
 ! grep -q "systemctl|" "$TMP_DIR/calls.log" || fail "config_remote should not call systemctl"
+
+: > "$TMP_DIR/calls.log"
+rm -f "$TMP_DIR/rclone-create.args"
+printf '%s\n%s\n%s\n%s\n' \
+  "http://127.0.0.1:5244/dav" \
+  "" \
+  "alice" \
+  "secret" | FAKE_REMOTE_MISSING=1 config_remote >/dev/null
+grep -q "rclone|--config $TMP_DIR/home/alice/.config/rclone/rclone.conf config create webdav_remote webdav" "$TMP_DIR/calls.log" || fail "missing remote should be created after probe"
+grep -q "vendor=other" "$TMP_DIR/rclone-create.args" || fail "created remote should keep default vendor"
+
+: > "$TMP_DIR/calls.log"
+config_output=""
+if config_output="$(printf '%s\n%s\n%s\n%s\n' \
+  "http://127.0.0.1:5244/dav" \
+  "" \
+  "alice" \
+  "secret" | FAKE_RCLONE_PROBE_LSD_FAIL=1 config_remote 2>&1)"; then
+  fail "config_remote should fail when probe lsd fails"
+fi
+printf '%s\n' "$config_output" | grep -q "真实 remote 未修改" || fail "probe failure should report real remote unchanged"
+! grep -q "config update webdav_remote" "$TMP_DIR/calls.log" || fail "probe failure should not update real remote"
+! grep -q "config create webdav_remote webdav" "$TMP_DIR/calls.log" || fail "probe failure should not create real remote"
+! grep -q "config delete webdav_remote" "$TMP_DIR/calls.log" || fail "probe failure should not delete real remote"
+if find "$TMP_DIR" -maxdepth 1 -name 'mount-webdav-rclone.*' -print -quit | grep -q .; then
+  fail "probe failure should remove probe config"
+fi
+
+: > "$TMP_DIR/calls.log"
+config_output=""
+if config_output="$(printf '%s\n%s\n%s\n%s\n' \
+  "http://127.0.0.1:5244/dav" \
+  "" \
+  "alice" \
+  "secret" | FAKE_RCLONE_FINAL_UPDATE_FAIL=1 config_remote 2>&1)"; then
+  fail "config_remote should fail when final update fails"
+fi
+printf '%s\n' "$config_output" | grep -q "未主动删除旧 remote" || fail "final update failure should report old remote was not deleted"
+grep -q "config update webdav_remote" "$TMP_DIR/calls.log" || fail "final update failure should attempt update"
+! grep -q "config delete webdav_remote" "$TMP_DIR/calls.log" || fail "final update failure should not delete old remote"
+if find "$TMP_DIR" -maxdepth 1 -name 'mount-webdav-rclone.*' -print -quit | grep -q .; then
+  fail "final update failure should remove probe config"
+fi
 
 : > "$TMP_DIR/calls.log"
 write_service >/dev/null

@@ -20,6 +20,12 @@ STOP_FILE="${STATE_DIR}/stopping"
 SYSTEMD_UNIT="${NAPCAT_SYSTEMD_UNIT:-napcat.service}"
 SELF="${BASH_SOURCE[0]}"
 SCREEN_SESSION="${NAPCAT_SCREEN_SESSION:-napcat}"
+STOP_TERM_ATTEMPTS="${NAPCAT_STOP_TERM_ATTEMPTS:-8}"
+STOP_KILL_ATTEMPTS="${NAPCAT_STOP_KILL_ATTEMPTS:-8}"
+STOP_WAIT_INTERVAL="${NAPCAT_STOP_WAIT_INTERVAL:-0.25}"
+[[ "${STOP_TERM_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_TERM_ATTEMPTS=8
+[[ "${STOP_KILL_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_KILL_ATTEMPTS=8
+[[ "${STOP_WAIT_INTERVAL}" =~ ^[0-9]+([.][0-9]+)?$ ]] || STOP_WAIT_INTERVAL=0.25
 
 QQ_BIN="${NAPCAT_QQ_BIN:-}"
 if [[ -z "${QQ_BIN}" ]]; then
@@ -219,6 +225,84 @@ current_pgid() {
   ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true
 }
 
+wait_for_pid_exit() {
+  local pid="$1"
+  local attempts="${2:-20}"
+  local interval="${3:-0.2}"
+  local i
+
+  for ((i=1; i<=attempts; i++)); do
+    kill -0 "${pid}" 2>/dev/null || return 0
+    sleep "${interval}"
+  done
+
+  kill -0 "${pid}" 2>/dev/null || return 0
+  return 1
+}
+
+child_pids_of() {
+  local parent="$1"
+  local stat pid ppid
+
+  [[ "${parent}" =~ ^[0-9]+$ ]] || return 0
+  for stat in /proc/[0-9]*/stat; do
+    pid="${stat%/stat}"
+    pid="${pid##*/}"
+    ppid="$(awk '{print $4}' "${stat}" 2>/dev/null || true)"
+    [[ "${ppid}" == "${parent}" ]] && printf '%s\n' "${pid}"
+  done
+}
+
+descendant_pids_of() {
+  local root="$1"
+  local queue=()
+  local seen=" "
+  local pid child
+
+  [[ "${root}" =~ ^[0-9]+$ ]] || return 0
+  queue=("${root}")
+  seen+=" ${root} "
+
+  while [[ "${#queue[@]}" -gt 0 ]]; do
+    pid="${queue[0]}"
+    queue=("${queue[@]:1}")
+
+    while IFS= read -r child; do
+      [[ "${child}" =~ ^[0-9]+$ ]] || continue
+      [[ "${seen}" == *" ${child} "* ]] && continue
+      seen+="${child} "
+      printf '%s\n' "${child}"
+      queue+=("${child}")
+    done < <(child_pids_of "${pid}")
+  done
+}
+
+terminate_pid_or_group() {
+  local signal="$1"
+  local pid="$2"
+  local self_pgid pgid
+
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 0
+  self_pgid="$(current_pgid "$$" || true)"
+  pgid="$(current_pgid "${pid}" || true)"
+
+  if [[ -n "${pgid}" && "${pgid}" == "${pid}" && "${pgid}" != "${self_pgid}" ]]; then
+    kill "-${signal}" "-${pgid}" 2>/dev/null || true
+  else
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+  fi
+}
+
+terminate_pid_list() {
+  local signal="$1"
+  shift || true
+
+  local pid
+  for pid in "$@"; do
+    terminate_pid_or_group "${signal}" "${pid}"
+  done
+}
+
 terminate_managed_processes() {
   local signal="$1"
   local self_pgid pid pgid killed_pgids=" "
@@ -229,7 +313,7 @@ terminate_managed_processes() {
     [[ "${pid}" =~ ^[0-9]+$ ]] || continue
     pgid="$(current_pgid "${pid}" || true)"
 
-    if [[ -n "${pgid}" && "${pgid}" != "${self_pgid}" && "${killed_pgids}" != *" ${pgid} "* ]]; then
+    if [[ -n "${pgid}" && "${pgid}" == "${pid}" && "${pgid}" != "${self_pgid}" && "${killed_pgids}" != *" ${pgid} "* ]]; then
       kill "-${signal}" "-${pgid}" 2>/dev/null || true
       killed_pgids+="${pgid} "
     else
@@ -577,7 +661,7 @@ stop_napcat() {
 
   terminate_managed_processes TERM
 
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 "${STOP_TERM_ATTEMPTS}"); do
     if ! has_managed_processes; then
       stop_screen_session
       rm -f "${PID_FILE}"
@@ -585,12 +669,12 @@ stop_napcat() {
       echo "NapCat 已手动停止"
       return 0
     fi
-    sleep 0.5
+    sleep "${STOP_WAIT_INTERVAL}"
   done
 
   terminate_managed_processes KILL
 
-  for _ in $(seq 1 10); do
+  for _ in $(seq 1 "${STOP_KILL_ATTEMPTS}"); do
     if ! has_managed_processes; then
       stop_screen_session
       rm -f "${PID_FILE}"
@@ -598,7 +682,7 @@ stop_napcat() {
       echo "NapCat 已手动强制停止"
       return 0
     fi
-    sleep 0.5
+    sleep "${STOP_WAIT_INTERVAL}"
   done
 
   rm -f "${PID_FILE}"
@@ -730,12 +814,19 @@ run_napcat() {
 
   stop_child() {
     if [[ -n "${child_pid:-}" ]]; then
-      kill -TERM "-${child_pid}" 2>/dev/null || kill -TERM "${child_pid}" 2>/dev/null || true
+      local target_pid descendants=()
+      target_pid="${child_pid}"
+      mapfile -t descendants < <(descendant_pids_of "${target_pid}")
+
+      terminate_pid_or_group TERM "${target_pid}"
+      terminate_pid_list TERM "${descendants[@]}"
+      if ! wait_for_pid_exit "${child_pid}" 10 0.2; then
+        terminate_pid_or_group KILL "${target_pid}"
+      fi
       wait "${child_pid}" 2>/dev/null || true
-      kill -KILL "-${child_pid}" 2>/dev/null || true
+      terminate_pid_list KILL "${descendants[@]}"
       child_pid=""
     fi
-    cleanup_child_leftovers
   }
 
   cleanup_child_leftovers() {
@@ -749,7 +840,7 @@ run_napcat() {
         is_pid_ours "${pid}" && continue
 
         if [[ -r "${proc}/environ" ]] && grep -z -F -q "NAPCAT_BOOTMAIN=${BASE_DIR}" "${proc}/environ" 2>/dev/null; then
-          kill "-${signal}" "${pid}" 2>/dev/null || true
+          terminate_pid_or_group "${signal}" "${pid}"
         fi
       done
 
@@ -764,7 +855,10 @@ run_napcat() {
 
     stop_child
     if [[ -n "${xvfb_pid:-}" ]]; then
-      kill "${xvfb_pid}" 2>/dev/null || true
+      terminate_pid_or_group TERM "${xvfb_pid}"
+      if ! wait_for_pid_exit "${xvfb_pid}" 10 0.2; then
+        terminate_pid_or_group KILL "${xvfb_pid}"
+      fi
       wait "${xvfb_pid}" 2>/dev/null || true
     fi
     if [[ "$(pid_from_file 2>/dev/null || true)" == "$$" ]]; then

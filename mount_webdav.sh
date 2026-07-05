@@ -151,7 +151,7 @@ check_fuse() {
 
 # ========= remote 配置 =========
 config_remote() {
-  local run_user conf_path
+  local run_user conf_path pass_obscured tmp_conf tmp_remote remote_exists=0
   run_user="$(detect_run_user)"
   conf_path="$(detect_rclone_conf_path "$run_user")"
 
@@ -167,15 +167,55 @@ config_remote() {
   [[ -n "${WEBDAV_URL:-}" && -n "${WEBDAV_USER:-}" && -n "${WEBDAV_PASS:-}" ]] || abort "URL/用户名/密码不能为空"
 
   run_as_user "$run_user" mkdir -p "$(dirname "$conf_path")"
-  run_as_user "$run_user" rclone --config "$conf_path" config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
-  run_as_user "$run_user" rclone --config "$conf_path" config create "$REMOTE_NAME" webdav \
+  pass_obscured="$(run_as_user "$run_user" rclone obscure "$WEBDAV_PASS")"
+  tmp_conf="$(run_as_user "$run_user" mktemp "${TMPDIR:-/tmp}/mount-webdav-rclone.XXXXXX")" || abort "无法创建 remote 探测临时配置"
+  tmp_remote="${REMOTE_NAME}_probe_$$"
+
+  cleanup_probe_remote() {
+    run_as_user "$run_user" rm -f "$tmp_conf" 2>/dev/null || true
+  }
+
+  if ! run_as_user "$run_user" rclone --config "$tmp_conf" config create "$tmp_remote" webdav \
     url="$WEBDAV_URL" \
     vendor="$WEBDAV_VENDOR" \
     user="$WEBDAV_USER" \
-    pass="$(run_as_user "$run_user" rclone obscure "$WEBDAV_PASS")" >/dev/null
+    pass="$pass_obscured" >/dev/null; then
+    cleanup_probe_remote
+    abort "remote 探测配置创建失败，真实 remote 未修改"
+  fi
 
-  info "remote 已创建: $REMOTE_NAME"
-  run_as_user "$run_user" rclone --config "$conf_path" lsd "${REMOTE_NAME}:" >/dev/null 2>&1 || abort "remote 连接测试失败，请检查参数"
+  if ! run_as_user "$run_user" rclone --config "$tmp_conf" lsd "${tmp_remote}:" >/dev/null 2>&1; then
+    cleanup_probe_remote
+    abort "remote 连接测试失败，请检查参数；真实 remote 未修改"
+  fi
+
+  if run_as_user "$run_user" rclone --config "$conf_path" listremotes 2>/dev/null | grep -qx "^${REMOTE_NAME}:$"; then
+    remote_exists=1
+  fi
+
+  if [[ "$remote_exists" -eq 1 ]]; then
+    if ! run_as_user "$run_user" rclone --config "$conf_path" config update "$REMOTE_NAME" \
+      url="$WEBDAV_URL" \
+      vendor="$WEBDAV_VENDOR" \
+      user="$WEBDAV_USER" \
+      pass="$pass_obscured" >/dev/null; then
+      cleanup_probe_remote
+      abort "remote 更新失败，未主动删除旧 remote；请检查配置文件: $conf_path"
+    fi
+    info "remote 已更新: $REMOTE_NAME"
+  else
+    if ! run_as_user "$run_user" rclone --config "$conf_path" config create "$REMOTE_NAME" webdav \
+      url="$WEBDAV_URL" \
+      vendor="$WEBDAV_VENDOR" \
+      user="$WEBDAV_USER" \
+      pass="$pass_obscured" >/dev/null; then
+      cleanup_probe_remote
+      abort "remote 创建失败；请检查配置文件: $conf_path"
+    fi
+    info "remote 已创建: $REMOTE_NAME"
+  fi
+
+  cleanup_probe_remote
   info "remote 连接测试通过"
 }
 

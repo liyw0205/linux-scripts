@@ -631,7 +631,14 @@ create_cmd() {
     done
     [[ -n "$tunnel_id" ]] || abort "创建成功但未拿到 tunnel id"
 
-    write_local_tunnel_files "$name" "$tunnel_id" "$url" || abort "本地配置/服务写入失败: $name"
+    if ! write_local_tunnel_files "$name" "$tunnel_id" "$url"; then
+        error "远端隧道已创建成功: $name"
+        error "远端 ID: $tunnel_id"
+        error "本地配置/服务已尝试回滚: ${CLOUDFLARED_HOME}/${name}.yml / $(service_file "$name")"
+        error "恢复建议: 修复本地写入/权限问题后执行 cf sync"
+        error "如果不保留该远端隧道，执行: cf delete $name"
+        abort "本地配置/服务写入失败，请按提示人工恢复: $name"
+    fi
 
     ui_print "已创建隧道: $name"
     echo "ID: $tunnel_id"
@@ -721,7 +728,17 @@ rename_cmd() {
         [[ -n "${c:-}" ]] && cred="$c"
     fi
 
-    write_local_tunnel_files "$new_name" "$id" "$url" "$cred" || abort "本地配置/服务写入失败，已保留旧本地文件: $old_name"
+    if ! write_local_tunnel_files "$new_name" "$id" "$url" "$cred"; then
+        error "远端已重命名成功: $old_name -> $new_name"
+        error "本地旧配置仍保留: $old_cfg"
+        error "旧服务已停止并禁用: $old_svc"
+        error "恢复建议: 修复本地写入/权限问题后执行 cf sync"
+        error "如需保留原穿透地址，执行: cf set-url $new_name $url"
+        if [[ "$was_enabled" -eq 1 ]]; then
+            error "原服务曾启用，恢复本地文件后执行: cf enable $new_name"
+        fi
+        abort "本地配置/服务写入失败，请按提示人工恢复: $new_name"
+    fi
 
     local old_svc_file new_svc_file
     old_svc_file="$(service_file "$old_name")"
@@ -767,7 +784,13 @@ sync_cmd() {
             [[ -n "${u:-}" ]] && url="$u"
         fi
 
-        write_local_tunnel_files "$name" "$id" "$url" || abort "本地配置/服务写入失败: $name"
+        if ! write_local_tunnel_files "$name" "$id" "$url"; then
+            rm -f "$tmp"
+            error "远端未被修改，失败项本地文件已尝试回滚: $name"
+            error "前面已成功同步的隧道不会自动回滚"
+            error "恢复建议: 修复本地写入/权限问题后重新执行 cf sync"
+            abort "本地配置/服务写入失败，请按提示人工恢复: $name"
+        fi
     done < "$tmp"
 
     rm -f "$tmp"
