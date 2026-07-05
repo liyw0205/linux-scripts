@@ -353,11 +353,66 @@
 - `mihomo.sh` 的核心/前端下载仍可继续收敛为临时文件验证后原子替换。
 - `napcat.sh patch` 下载/编译失败时是否污染最终启动器产物仍缺少无副作用回归测试。
 
-## 阶段 9 预期
+## 阶段 9：高风险写入路径收敛
 
-继续收敛高风险写入路径：
+日期：2026-07-05
 
-- 评估并测试 `webdav_copyto_relay.sh` 的 remote 重建时机，优先减少 `start` 的配置写入副作用。
-- 为 `mihomo.sh` 核心与前端安装补充无副作用回归测试，验证下载失败不破坏旧文件。
-- 为 `napcat.sh patch` 补充 fake `curl` / `g++` 回归测试，验证失败不污染既有 `libnapcat_launcher.so`。
-- 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `webdav_copyto_relay.sh`、`mihomo.sh` 和 `napcat.sh patch` 高风险写入路径审查。
+- `webdav_copyto_relay.sh`
+  - 新增 `ensure_remote_available`，`start` 只做 remote 可用性与路径存在性检查。
+  - `start` 不再调用 `config_remote`，不会在普通启动时执行 `rclone config delete/create` 或 `rclone obscure`。
+  - fake `rclone` fixture 增加 remote 不可用模式。
+  - 回归测试覆盖：
+    - `start` 成功路径不会重写 rclone 配置。
+    - remote 不可用时 `start` 失败且不写 rclone 配置、不留下任务 PID。
+- `mihomo.sh`
+  - `download_file` 改为写入同目录临时文件，校验大小和 HTML/XML 类型后再 `mv -f` 到目标，失败保留旧文件。
+  - `backup_file` 改为 `mktemp` 唯一备份名并使用 `cp -p` 保留元数据。
+  - 核心安装改为解压到 `MIHOMO_BIN` 同目录临时文件，`gunzip` 和 `chmod` 成功后再替换最终核心。
+  - 新增 `replace_dir_with_backup`，前端安装先解压到 `MIHOMO_DIR` 下 staging 目录，校验 `index.html` 后再替换 UI；替换失败会恢复旧 UI。
+  - `install_metacubexd` / `install_zashboard` 下载失败、坏包或解压失败时不再删除旧 UI。
+  - 新增 `tests/mihomo_install_atomic_regression.sh`，覆盖下载 HTML、坏 gzip、前端下载失败、坏 tar、坏 zip 均保留旧产物。
+- `napcat.sh`
+  - `patch_napcat` 改为临时下载 `launcher.cpp`、临时编译 `.so`、临时 `chmod` 成功后再发布最终 `libnapcat_launcher.so`。
+  - `curl` 下载增加 `-fSL`、连接超时和总超时，避免 HTTP 错误页被当作源码。
+  - 下载、编译或 `chmod` 失败时保留既有 `launcher.cpp` 和 `libnapcat_launcher.so`。
+  - 新增 `tests/napcat_patch_regression.sh`，覆盖 fake `curl` 失败、fake `g++` 失败和 fake `chmod` 失败。
+- README
+  - 同步 `webdav_copyto_relay.sh start` 新行为：只做只读检查，不重建 rclone remote。
+- 测试工程化
+  - `scripts/test.sh` 接入新增 Mihomo 安装原子性和 NapCat patch 原子性回归测试。
+
+### 验证结果
+
+- `bash -n webdav_copyto_relay.sh` 通过。
+- `bash -n mihomo.sh` 通过。
+- `bash -n napcat.sh` 通过。
+- `bash tests/webdav_copyto_relay_regression.sh all` 通过。
+- `bash tests/mihomo_install_atomic_regression.sh` 通过。
+- `bash tests/napcat_patch_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 rclone 配置/传输、WebDAV 访问、Mihomo 下载/重启、NapCat 下载/编译、systemd 启停或外部服务部署。
+- `webdav_copyto_relay.sh config_remote` 在 `install` / `reconfig` 中仍是 delete/create 后测试，失败可能影响同名 remote；阶段 9 先移除 `start` 副作用，后续可继续收敛配置写入事务。
+- `webdav_copyto_relay.sh reconfig` 仍先保存本地配置再重建 remote，失败恢复策略可继续完善。
+- `mihomo.sh download_country_mmdb` / `repair_mmdb` 仍会先删除旧 mmdb 再下载，后续可复用本阶段的下载原子化思路继续修复。
+
+## 阶段 10 预期
+
+继续收敛剩余配置写入和资源下载失败路径：
+
+- `webdav_copyto_relay.sh`
+  - 改造 `config_remote`，避免错误凭据或连接失败时破坏旧同名 rclone remote。
+  - 为 `reconfig` 增加失败恢复测试，避免本地配置和 rclone remote 出现半更新状态。
+- `mihomo.sh`
+  - 收敛 `download_country_mmdb` / `repair_mmdb` 的 delete-before-download 行为，下载失败时保留旧 mmdb。
+  - 可补成功路径回归，验证核心/前端 staging 成功后最终文件和 metadata 正确发布。
+- 测试工具链
+  - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。

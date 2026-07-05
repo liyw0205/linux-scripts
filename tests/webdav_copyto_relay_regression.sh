@@ -108,10 +108,33 @@ test_skip() {
   grep -qx "SUCCESS=0" "$tmp/state/stats.env" || fail "success count mismatch"
   grep -qx "FAIL=0" "$tmp/state/stats.env" || fail "fail count mismatch"
   [[ ! -e "$tmp/copyto.started" ]] || fail "copyto should not run for same-size remote file"
+  ! grep -Eq '^config (delete|create)|^obscure' "$tmp/rclone.calls" || fail "start should not rewrite rclone config"
+  grep -qx "lsd fake:" "$tmp/rclone.calls" || fail "start should check remote availability"
   wait_for_absent "$tmp/state/task.pid" || fail "finished task pid should be cleaned"
   cleanup_tmp "$tmp"
   CURRENT_TMP=""
   echo "ok - webdav skip same-size remote"
+}
+
+test_start_remote_fail_no_config_write() {
+  local tmp
+  tmp="$(mktemp -d)"
+  CURRENT_TMP="$tmp"
+  mkdir -p "$tmp/state" "$tmp/tmpdir"
+  write_config "$tmp"
+
+  if FAKE_RCLONE_MODE=remote_fail run_relay "$tmp" start >/dev/null 2>/dev/null; then
+    fail "start should fail when remote is unavailable"
+  fi
+
+  [[ -s "$tmp/rclone.calls" ]] || fail "remote failure should still record rclone call"
+  grep -qx "lsd fake:" "$tmp/rclone.calls" || fail "start should perform read-only remote check"
+  ! grep -Eq '^config (delete|create)|^obscure' "$tmp/rclone.calls" || fail "remote failure should not rewrite rclone config"
+  [[ ! -e "$tmp/state/task.pid" ]] || fail "failed start should not leave task pid"
+
+  cleanup_tmp "$tmp"
+  CURRENT_TMP=""
+  echo "ok - webdav start remote failure is read-only"
 }
 
 test_stop() {
@@ -142,12 +165,14 @@ test_stop() {
 
 case "${1:-all}" in
   skip) test_skip ;;
+  remote-fail) test_start_remote_fail_no_config_write ;;
   stop) test_stop ;;
   all)
     test_skip
+    test_start_remote_fail_no_config_write
     test_stop
     ;;
   *)
-    fail "usage: $0 [skip|stop|all]"
+    fail "usage: $0 [skip|remote-fail|stop|all]"
     ;;
 esac

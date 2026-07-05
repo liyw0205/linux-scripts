@@ -355,9 +355,40 @@ patch_napcat() {
     download_url="${target_proxy}/${cpp_url#https://}"
   fi
 
-  curl -k -L -# "${download_url}" -o "${cpp_file}"
-  g++ -shared -fPIC "${cpp_file}" -o "${LAUNCHER_SO}" -ldl
-  chmod 755 "${LAUNCHER_SO}"
+  local launcher_dir launcher_base tmp_dir tmp_cpp tmp_so
+  launcher_dir="$(dirname -- "${LAUNCHER_SO}")"
+  launcher_base="$(basename -- "${LAUNCHER_SO}")"
+  mkdir -p "${launcher_dir}"
+  tmp_dir="$(mktemp -d "${BASE_DIR}/.napcat-patch.XXXXXX")" || return 1
+  tmp_cpp="${tmp_dir}/launcher.cpp"
+  tmp_so="$(mktemp "${launcher_dir}/.${launcher_base}.XXXXXX")" || {
+    rm -rf "${tmp_dir}"
+    return 1
+  }
+  rm -f "${tmp_so}"
+
+  if ! curl -k -fSL --connect-timeout "${timeout}" --max-time $((timeout * 2)) -o "${tmp_cpp}" "${download_url}"; then
+    rm -rf "${tmp_dir}"
+    rm -f "${tmp_so}"
+    return 1
+  fi
+  if ! g++ -shared -fPIC "${tmp_cpp}" -o "${tmp_so}" -ldl; then
+    rm -rf "${tmp_dir}"
+    rm -f "${tmp_so}"
+    return 1
+  fi
+  if ! chmod 755 "${tmp_so}"; then
+    rm -rf "${tmp_dir}"
+    rm -f "${tmp_so}"
+    return 1
+  fi
+  if ! mv -f "${tmp_so}" "${LAUNCHER_SO}"; then
+    rm -rf "${tmp_dir}"
+    rm -f "${tmp_so}"
+    return 1
+  fi
+  cp "${tmp_cpp}" "${cpp_file}" 2>/dev/null || true
+  rm -rf "${tmp_dir}"
   echo "补丁完成: ${LAUNCHER_SO}"
 }
 

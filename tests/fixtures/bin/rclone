@@ -15,6 +15,9 @@ case "${1:-}" in
     exit 0
     ;;
   lsd)
+    if [[ "$mode" == "remote_fail" ]]; then
+      exit 1
+    fi
     exit 0
     ;;
   lsf)

@@ -360,6 +360,11 @@ config_remote() {
   info "WebDAV 连接测试通过"
 }
 
+ensure_remote_available() {
+  rclone lsd "${REMOTE_NAME}:" >/dev/null 2>&1 \
+    || die "rclone remote 不可用: ${REMOTE_NAME}:，请先执行 install 或 reconfig"
+}
+
 rclone_base_args() {
   echo \
     --transfers="$RCLONE_TRANSFERS" \
@@ -743,7 +748,7 @@ start_cmd() {
   ensure_state_dir
   load_config
   install_deps
-  config_remote
+  ensure_remote_available
   ensure_remote_paths_exist
 
   if [[ -f "$PID_FILE" ]]; then

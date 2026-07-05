@@ -163,11 +163,15 @@ download_file() {
     local original_url="$1"
     local output="$2"
     local description="${3:-$(basename "$output")}"
+    local output_dir output_base tmp_output
 
     local mirrors
     mapfile -t mirrors < <(get_github_mirrors)
 
-    rm -f "$output"
+    output_dir="$(dirname "$output")"
+    output_base="$(basename "$output")"
+    mkdir -p "$output_dir"
+    tmp_output="$(mktemp "${output_dir}/.${output_base}.download.XXXXXX")" || return 1
 
     for mirror in "${mirrors[@]}"; do
         local url
@@ -183,27 +187,33 @@ download_file() {
         for i in 1 2 3; do
             log_info "下载尝试 $i/3：$description"
 
-            if curl -fL --connect-timeout 8 --max-time 180 -o "$output" "$url" 2>/dev/null; then
-                if [ -f "$output" ]; then
+            rm -f "$tmp_output"
+            if curl -fL --connect-timeout 8 --max-time 180 -o "$tmp_output" "$url" 2>/dev/null; then
+                if [ -f "$tmp_output" ]; then
                     local size
-                    size="$(stat -c%s "$output" 2>/dev/null || echo 0)"
+                    size="$(stat -c%s "$tmp_output" 2>/dev/null || echo 0)"
                     local type
-                    type="$(file "$output" 2>/dev/null || echo unknown)"
+                    type="$(file "$tmp_output" 2>/dev/null || echo unknown)"
 
                     if [ "$size" -lt 100 ]; then
                         log_warn "文件过小，可能下载失败：${size} bytes"
-                        rm -f "$output"
+                        rm -f "$tmp_output"
                         continue
                     fi
 
                     if echo "$type" | grep -qiE "HTML|XML"; then
                         log_warn "下载到的是网页，不是目标文件：$type"
-                        rm -f "$output"
+                        rm -f "$tmp_output"
                         continue
                     fi
 
-                    log_success "下载成功：$output (${size} bytes)"
-                    return 0
+                    if mv -f "$tmp_output" "$output"; then
+                        log_success "下载成功：$output (${size} bytes)"
+                        return 0
+                    fi
+                    rm -f "$tmp_output"
+                    log_error "保存下载文件失败：$output"
+                    return 1
                 fi
             fi
 
@@ -213,6 +223,7 @@ download_file() {
 
     log_error "下载失败：$description"
     log_error "原始地址：$original_url"
+    rm -f "$tmp_output"
     return 1
 }
 
@@ -220,8 +231,9 @@ backup_file() {
     local file="$1"
 
     if [ -f "$file" ]; then
-        local backup="${file}.bak.$(date +%Y%m%d_%H%M%S)"
-        cp "$file" "$backup"
+        local backup
+        backup="$(mktemp "${file}.bak.$(date +%Y%m%d_%H%M%S).XXXXXX")" || return 1
+        cp -p "$file" "$backup"
         log_info "已备份：$backup"
     fi
 }
@@ -946,7 +958,7 @@ download_and_install_core() {
     local arch_file
     arch_file="$(detect_arch_file)"
     local url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${arch_file}"
-    local tmp_dir tmp_file
+    local tmp_dir tmp_file bin_dir tmp_bin
 
     log_info "Mihomo 版本：$MIHOMO_VERSION"
     log_info "核心文件：$arch_file"
@@ -957,14 +969,61 @@ download_and_install_core() {
         rm -rf "$tmp_dir"
         return 1
     fi
-    gunzip -c "$tmp_file" > "$MIHOMO_BIN" || {
+
+    bin_dir="$(dirname "$MIHOMO_BIN")"
+    mkdir -p "$bin_dir"
+    tmp_bin="$(mktemp "${bin_dir}/.mihomo.XXXXXX")" || {
         rm -rf "$tmp_dir"
         return 1
     }
-    chmod +x "$MIHOMO_BIN"
+
+    if ! gunzip -c "$tmp_file" > "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! chmod +x "$tmp_bin"; then
+        rm -f "$tmp_bin"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! mv -f "$tmp_bin" "$MIHOMO_BIN"; then
+        rm -f "$tmp_bin"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
     rm -rf "$tmp_dir"
 
     log_success "Mihomo 核心已安装：$MIHOMO_BIN"
+}
+
+replace_dir_with_backup() {
+    local src_dir="$1"
+    local dst_dir="$2"
+    local parent backup_dir=""
+
+    parent="$(dirname "$dst_dir")"
+    mkdir -p "$parent"
+
+    if [ -e "$dst_dir" ]; then
+        backup_dir="$(mktemp -d "${parent}/.$(basename "$dst_dir").bak.XXXXXX")" || return 1
+        rmdir "$backup_dir"
+        if ! mv "$dst_dir" "$backup_dir"; then
+            rm -rf "$backup_dir"
+            return 1
+        fi
+    fi
+
+    if mv "$src_dir" "$dst_dir"; then
+        [ -n "$backup_dir" ] && rm -rf "$backup_dir"
+        return 0
+    fi
+
+    rm -rf "$dst_dir"
+    if [ -n "$backup_dir" ] && [ -e "$backup_dir" ]; then
+        mv "$backup_dir" "$dst_dir" || true
+    fi
+    return 1
 }
 
 create_systemd_service() {
@@ -992,45 +1051,69 @@ EOF
 
 install_metacubexd() {
     log_info "安装 MetaCubeXD 前端..."
-    local tmp_dir tmp_file
+    local tmp_dir tmp_file stage_dir
     mkdir -p "$MIHOMO_DIR"
-    rm -rf "$UI_DIR"
-    mkdir -p "$UI_DIR"
-    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-ui.XXXXXX")"
+    tmp_dir="$(mktemp -d "${MIHOMO_DIR}/.ui-download.XXXXXX")"
     tmp_file="${tmp_dir}/metacubexd.tgz"
+    stage_dir="${tmp_dir}/ui"
+    mkdir -p "$stage_dir"
     if ! download_file "$METACUBEXD_DOWNLOAD_URL" "$tmp_file" "MetaCubeXD"; then
         rm -rf "$tmp_dir"
         return 1
     fi
-    tar -xzf "$tmp_file" -C "$UI_DIR" || {
+    tar -tzf "$tmp_file" >/dev/null || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    tar -xzf "$tmp_file" -C "$stage_dir" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if ! find "$stage_dir" -type f -name 'index.html' -print -quit | grep -q .; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    echo "metacubexd" > "$stage_dir/.frontend_info"
+    echo "MetaCubeXD ${METACUBEXD_VERSION}" > "$stage_dir/.frontend_version"
+    replace_dir_with_backup "$stage_dir" "$UI_DIR" || {
         rm -rf "$tmp_dir"
         return 1
     }
     rm -rf "$tmp_dir"
-    echo "metacubexd" > "$UI_DIR/.frontend_info"
-    echo "MetaCubeXD ${METACUBEXD_VERSION}" > "$UI_DIR/.frontend_version"
     log_success "MetaCubeXD 安装完成"
 }
 
 install_zashboard() {
     log_info "安装 Zashboard 前端..."
-    local tmp_dir tmp_file
+    local tmp_dir tmp_file stage_dir
     mkdir -p "$MIHOMO_DIR"
-    rm -rf "$UI_DIR"
-    mkdir -p "$UI_DIR"
-    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-ui.XXXXXX")"
+    tmp_dir="$(mktemp -d "${MIHOMO_DIR}/.ui-download.XXXXXX")"
     tmp_file="${tmp_dir}/zashboard.zip"
+    stage_dir="${tmp_dir}/ui"
+    mkdir -p "$stage_dir"
     if ! download_file "$ZASHBOARD_DOWNLOAD_URL" "$tmp_file" "Zashboard"; then
         rm -rf "$tmp_dir"
         return 1
     fi
-    unzip -q "$tmp_file" -d "$UI_DIR" || {
+    unzip -tq "$tmp_file" >/dev/null || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    unzip -q "$tmp_file" -d "$stage_dir" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    if ! find "$stage_dir" -type f -name 'index.html' -print -quit | grep -q .; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    echo "zashboard" > "$stage_dir/.frontend_info"
+    echo "Zashboard ${ZASHBOARD_VERSION}" > "$stage_dir/.frontend_version"
+    replace_dir_with_backup "$stage_dir" "$UI_DIR" || {
         rm -rf "$tmp_dir"
         return 1
     }
     rm -rf "$tmp_dir"
-    echo "zashboard" > "$UI_DIR/.frontend_info"
-    echo "Zashboard ${ZASHBOARD_VERSION}" > "$UI_DIR/.frontend_version"
     log_success "Zashboard 安装完成"
 }
 
