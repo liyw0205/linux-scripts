@@ -18,7 +18,9 @@ RCLONE_CONFIG="${RCLONE_CONFIG:-}"
 
 RPC_PORT="${RPC_PORT:-6800}"
 LISTEN_PORT="${LISTEN_PORT:-6801-6999}"
+RPC_LISTEN_ALL="${RPC_LISTEN_ALL:-false}"
 RPC_SECRET="${RPC_SECRET:-}"
+SECRET_ENV_FILE="${SECRET_ENV_FILE:-$MODDIR/a2up-secret.env}"
 
 SERVICE_NAME="${SERVICE_NAME:-aria2c.service}"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
@@ -124,7 +126,62 @@ ask_default(){
   echo "$val"
 }
 
+generate_rpc_secret(){
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+  else
+    od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+  fi
+}
+
+is_safe_rpc_secret(){
+  local secret="$1"
+  [[ "$secret" =~ ^[A-Za-z0-9._-]{8,128}$ ]]
+}
+
+read_conf_rpc_secret(){
+  [[ -f "$CONF_FILE" ]] || return 0
+  awk -F= '/^[[:space:]]*rpc-secret[[:space:]]*=/ {
+    value = $2
+    sub(/^[[:space:]]*/, "", value)
+    sub(/[[:space:]]*$/, "", value)
+    print value
+    exit
+  }' "$CONF_FILE"
+}
+
+ensure_rpc_secret(){
+  local existing
+
+  if [[ -n "${RPC_SECRET:-}" ]]; then
+    is_safe_rpc_secret "$RPC_SECRET" || die "RPC_SECRET 只能包含 8-128 位字母、数字、点、下划线或连字符"
+    return 0
+  fi
+
+  existing="$(read_conf_rpc_secret || true)"
+  if [[ -n "${existing:-}" ]]; then
+    if is_safe_rpc_secret "$existing"; then
+      RPC_SECRET="$existing"
+      return 0
+    fi
+    warn "现有 rpc-secret 包含不安全字符，将重新生成"
+  fi
+
+  RPC_SECRET="$(generate_rpc_secret)"
+  is_safe_rpc_secret "$RPC_SECRET" || die "无法生成可用 RPC 密钥"
+  ok "已生成 aria2 RPC 密钥"
+}
+
+write_secret_env(){
+  ensure_rpc_secret
+  run_root tee "$SECRET_ENV_FILE" >/dev/null <<EOF
+ARIA2_RPC_SECRET=${RPC_SECRET}
+EOF
+  run_root chmod 600 "$SECRET_ENV_FILE" 2>/dev/null || true
+}
+
 interactive_config(){
+  local _sec existing_secret
   echo
   ok "开始交互配置（回车使用默认值）"
   DOWNLOAD_DIR="$(ask_default '本地下载目录' "$DOWNLOAD_DIR")"
@@ -134,9 +191,15 @@ interactive_config(){
   LISTEN_PORT="$(ask_default 'BT/DHT 端口(范围可)' "$LISTEN_PORT")"
   MIN_AGE="$(ask_default '文件稳定判定秒数' "$MIN_AGE")"
   STABLE_CHECK_GAP="$(ask_default '二次大小稳定检查间隔秒数' "$STABLE_CHECK_GAP")"
-  read -r -s -p "RPC 密钥(留空不启用): " _sec || true
+  existing_secret="${RPC_SECRET:-$(read_conf_rpc_secret || true)}"
+  read -r -s -p "RPC 密钥(留空保留已有/自动生成): " _sec || true
   echo
-  RPC_SECRET="${_sec:-}"
+  if [[ -n "${_sec:-}" ]]; then
+    RPC_SECRET="$_sec"
+  else
+    RPC_SECRET="$existing_secret"
+  fi
+  ensure_rpc_secret
 }
 
 prepare_dirs(){
@@ -686,6 +749,7 @@ ensure_hook_ready(){
 }
 
 write_conf(){
+  ensure_rpc_secret
   run_root tee "$CONF_FILE" >/dev/null <<EOF
 # aria2 下载目录
 dir=${DOWNLOAD_DIR}
@@ -707,10 +771,10 @@ save-session-interval=60
 
 # RPC
 enable-rpc=true
-rpc-listen-all=true
+rpc-listen-all=${RPC_LISTEN_ALL}
 rpc-listen-port=${RPC_PORT}
 rpc-allow-origin-all=true
-$( [[ -n "$RPC_SECRET" ]] && echo "rpc-secret=${RPC_SECRET}" )
+rpc-secret=${RPC_SECRET}
 
 # BT / DHT
 follow-torrent=true
@@ -732,6 +796,8 @@ ensure_conf_ready(){
   if [[ ! -f "$CONF_FILE" ]]; then
     warn "aria2 配置不存在，自动重建: $CONF_FILE"
     write_conf
+  else
+    ensure_rpc_secret
   fi
 }
 
@@ -765,7 +831,6 @@ Environment=HOOK_LOCK=/tmp/aria2-upload.lock
 Environment=MIN_AGE=${MIN_AGE}
 Environment=STABLE_CHECK_GAP=${STABLE_CHECK_GAP}
 Environment=ARIA2_RPC_URL=http://127.0.0.1:${RPC_PORT}/jsonrpc
-Environment=ARIA2_RPC_SECRET=${RPC_SECRET}
 Environment=JQ_BIN=${jq_bin}
 ExecStart=${aria2_bin} --conf-path=${CONF_FILE}
 Restart=always
@@ -786,6 +851,7 @@ write_scan_service(){
   rclone_bin="$(command -v rclone)"
   jq_bin="$(command -v jq)"
   init_rclone_config
+  write_secret_env
 
   run_root tee "$SCAN_SERVICE_FILE" >/dev/null <<EOF
 [Unit]
@@ -810,7 +876,7 @@ Environment=HOOK_LOCK=/tmp/aria2-upload.lock
 Environment=MIN_AGE=${MIN_AGE}
 Environment=STABLE_CHECK_GAP=${STABLE_CHECK_GAP}
 Environment=ARIA2_RPC_URL=http://127.0.0.1:${RPC_PORT}/jsonrpc
-Environment=ARIA2_RPC_SECRET=${RPC_SECRET}
+EnvironmentFile=${SECRET_ENV_FILE}
 Environment=JQ_BIN=${jq_bin}
 ExecStart=/usr/bin/env bash ${HOOK_SCRIPT}
 EOF
@@ -842,9 +908,11 @@ preflight_check(){
   require_systemd
   validate_binaries
   init_rclone_config
+  ensure_rpc_secret
   ensure_runtime_files
   ensure_download_dir
   ensure_conf_ready
+  write_secret_env
   ensure_hook_ready
   ensure_services_ready
   check_remote
@@ -934,8 +1002,9 @@ info_cmd(){
   echo "MIN_AGE=$MIN_AGE"
   echo "STABLE_CHECK_GAP=$STABLE_CHECK_GAP"
   echo "PATCH_TARGET=$PATCH_TARGET"
+  echo "SECRET_ENV_FILE=$SECRET_ENV_FILE"
   echo
-  cat "$CONF_FILE" 2>/dev/null || true
+  sed -E 's/^(rpc-secret=).*/\1<redacted>/' "$CONF_FILE" 2>/dev/null || true
 }
 
 reconfig_cmd(){
@@ -1005,6 +1074,22 @@ doctor_cmd(){
   echo
   echo "== 权限检查 =="
   [[ -x "$HOOK_SCRIPT" ]] && echo "[OK] hook 可执行" || echo "[NO] hook 不可执行"
+
+  echo
+  echo "== RPC 安全检查 =="
+  if [[ -f "$CONF_FILE" ]]; then
+    grep -qE '^[[:space:]]*rpc-listen-all=false[[:space:]]*$' "$CONF_FILE" \
+      && echo "[OK] RPC 仅监听本机" \
+      || echo "[NO] rpc-listen-all 不是 false"
+    [[ -n "$(read_conf_rpc_secret || true)" ]] \
+      && echo "[OK] rpc-secret 已配置" \
+      || echo "[NO] rpc-secret 未配置"
+  else
+    echo "[NO] 配置文件不存在，无法检查 RPC"
+  fi
+  [[ -f "$SECRET_ENV_FILE" ]] \
+    && echo "[OK] 扫描服务密钥环境文件存在: $SECRET_ENV_FILE" \
+    || echo "[NO] 扫描服务密钥环境文件不存在: $SECRET_ENV_FILE"
 
   echo
   echo "== rclone remote 检查 =="

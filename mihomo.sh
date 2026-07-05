@@ -39,7 +39,7 @@ ZASHBOARD_DOWNLOAD_URL="${ZASHBOARD_DOWNLOAD_URL:-https://github.com/Zephyruso/z
 
 DEFAULT_HTTP_PORT="7890"
 DEFAULT_SOCKS_PORT="7891"
-DEFAULT_CONTROLLER="0.0.0.0:9090"
+DEFAULT_CONTROLLER="127.0.0.1:9090"
 
 HEALTH_CHECK_URL="${HEALTH_CHECK_URL:-http://www.gstatic.com/generate_204}"
 HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-300}"
@@ -225,8 +225,53 @@ get_config_value() {
     local key="$1"
 
     if [ -f "$CONFIG_FILE" ]; then
-        grep -E "^[[:space:]]*${key}:" "$CONFIG_FILE" | head -n1 | awk -F': ' '{print $2}' | tr -d '"'
+        grep -E "^${key}:" "$CONFIG_FILE" | head -n1 | awk -F': ' '{print $2}' | tr -d '"'
     fi
+}
+
+generate_controller_secret() {
+    if command_exists openssl; then
+        openssl rand -hex 24
+    else
+        od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+    fi
+}
+
+is_safe_controller_secret() {
+    local secret="$1"
+    [[ "$secret" =~ ^[A-Za-z0-9._-]{8,128}$ ]]
+}
+
+get_secret_from_config() {
+    get_config_value "secret"
+}
+
+ensure_controller_secret() {
+    local secret
+
+    ensure_config_exists
+    secret="$(get_secret_from_config)"
+    if [ -n "${secret:-}" ]; then
+        if is_safe_controller_secret "$secret"; then
+            echo "$secret"
+            return 0
+        fi
+        log_warn "现有 secret 包含不安全字符，将重新生成"
+    fi
+
+    secret="$(generate_controller_secret)"
+    is_safe_controller_secret "$secret" || {
+        log_error "无法生成可用管理密钥"
+        exit 1
+    }
+
+    if grep -qE '^secret:' "$CONFIG_FILE"; then
+        sed -i -E "s#^secret:.*#secret: ${secret}#g" "$CONFIG_FILE"
+    else
+        echo "secret: ${secret}" >> "$CONFIG_FILE"
+    fi
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    echo "$secret"
 }
 
 get_controller_from_config() {
@@ -239,6 +284,25 @@ get_controller_port() {
     local controller
     controller="$(get_controller_from_config)"
     echo "$controller" | awk -F':' '{print $NF}'
+}
+
+get_controller_host() {
+    local controller
+    controller="$(get_controller_from_config)"
+    echo "${controller%:*}"
+}
+
+get_controller_display_host() {
+    local host
+    host="$(get_controller_host)"
+    case "$host" in
+        0.0.0.0|"")
+            get_server_ip
+            ;;
+        *)
+            echo "$host"
+            ;;
+    esac
 }
 
 get_http_port() {
@@ -282,12 +346,12 @@ normalize_controller() {
     fi
 
     if echo "$input" | grep -qE '^[0-9]+$'; then
-        echo "0.0.0.0:${input}"
+        echo "127.0.0.1:${input}"
         return 0
     fi
 
     if echo "$input" | grep -qE '^:[0-9]+$'; then
-        echo "0.0.0.0${input}"
+        echo "127.0.0.1${input}"
         return 0
     fi
 
@@ -566,6 +630,13 @@ create_default_config() {
         return 0
     fi
 
+    local secret
+    secret="$(generate_controller_secret)"
+    is_safe_controller_secret "$secret" || {
+        log_error "无法生成可用管理密钥"
+        exit 1
+    }
+
     cat > "$CONFIG_FILE" <<EOF
 port: ${DEFAULT_HTTP_PORT}
 socks-port: ${DEFAULT_SOCKS_PORT}
@@ -573,6 +644,7 @@ allow-lan: true
 mode: rule
 log-level: info
 external-controller: ${DEFAULT_CONTROLLER}
+secret: ${secret}
 external-ui: ui
 
 dns:
@@ -605,6 +677,7 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,PROXY
 EOF
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
     log_success "已生成默认配置：$CONFIG_FILE"
 }
@@ -613,9 +686,15 @@ create_subscription_config() {
     local controller
     local http_port
     local socks_port
+    local secret
 
     controller="$(get_controller_from_config)"
     controller="${controller:-$DEFAULT_CONTROLLER}"
+
+    secret="$(get_secret_from_config)"
+    if [ -z "${secret:-}" ] || ! is_safe_controller_secret "$secret"; then
+        secret="$(generate_controller_secret)"
+    fi
 
     http_port="$(get_http_port)"
     http_port="${http_port:-$DEFAULT_HTTP_PORT}"
@@ -632,6 +711,7 @@ allow-lan: true
 mode: rule
 log-level: info
 external-controller: ${controller}
+secret: ${secret}
 external-ui: ui
 
 dns:
@@ -712,6 +792,7 @@ rules:
   - GEOIP,CN,DIRECT
   - MATCH,PROXY
 EOF
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
     if [ -f "$SOCKS5_GROUP_STATE" ]; then
         # shellcheck disable=SC1090
@@ -909,11 +990,12 @@ change_controller_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^[[:space:]]*external-controller:' "$CONFIG_FILE"; then
-        sed -i -E "s#^[[:space:]]*external-controller:.*#external-controller: ${controller}#g" "$CONFIG_FILE"
+    if grep -qE '^external-controller:' "$CONFIG_FILE"; then
+        sed -i -E "s#^external-controller:.*#external-controller: ${controller}#g" "$CONFIG_FILE"
     else
         echo "external-controller: ${controller}" >> "$CONFIG_FILE"
     fi
+    ensure_controller_secret >/dev/null
 
     log_success "external-controller 已修改为：$controller"
     test_and_restart
@@ -937,8 +1019,8 @@ change_http_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^[[:space:]]*port:' "$CONFIG_FILE"; then
-        sed -i -E "s#^[[:space:]]*port:.*#port: ${port}#g" "$CONFIG_FILE"
+    if grep -qE '^port:' "$CONFIG_FILE"; then
+        sed -i -E "s#^port:.*#port: ${port}#g" "$CONFIG_FILE"
     else
         sed -i "1i port: ${port}" "$CONFIG_FILE"
     fi
@@ -965,10 +1047,10 @@ change_socks_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^[[:space:]]*socks-port:' "$CONFIG_FILE"; then
-        sed -i -E "s#^[[:space:]]*socks-port:.*#socks-port: ${port}#g" "$CONFIG_FILE"
+    if grep -qE '^socks-port:' "$CONFIG_FILE"; then
+        sed -i -E "s#^socks-port:.*#socks-port: ${port}#g" "$CONFIG_FILE"
     else
-        sed -i "/^[[:space:]]*port:/a socks-port: ${port}" "$CONFIG_FILE"
+        sed -i "/^port:/a socks-port: ${port}" "$CONFIG_FILE"
     fi
 
     log_success "SOCKS5 代理端口 socks-port 已修改为：$port"
@@ -981,6 +1063,7 @@ change_socks_port() {
 # =========================
 
 test_and_restart() {
+    ensure_controller_secret >/dev/null
     download_country_mmdb
     if [ -x "$MIHOMO_BIN" ]; then
         log_info "测试 Mihomo 配置..."
@@ -998,15 +1081,22 @@ test_and_restart() {
 }
 
 show_access_info() {
-    local ip http_port socks_port controller_port
+    local ip http_port socks_port controller_port controller_host secret
     ip="$(get_server_ip)"
     http_port="$(get_http_port)"
     socks_port="$(get_socks_port)"
     controller_port="$(get_controller_port)"
+    controller_host="$(get_controller_display_host)"
+    secret="$(get_secret_from_config)"
 
     echo ""
     echo -e "${CYAN}访问与代理信息：${NC}"
-    echo "  Web 管理界面: http://${ip}:${controller_port}"
+    echo "  Web 管理界面: http://${controller_host}:${controller_port}"
+    if [ -n "${secret:-}" ]; then
+        echo "  Web 管理密钥: 已设置（见 ${CONFIG_FILE} 的 secret 字段）"
+    else
+        echo "  Web 管理密钥: 未设置"
+    fi
     echo "  HTTP 代理    : http://${ip}:${http_port}"
     echo "  SOCKS5 代理  : ${ip}:${socks_port}"
     echo ""
@@ -1014,6 +1104,7 @@ show_access_info() {
 
 start_mihomo() {
     check_root
+    ensure_controller_secret >/dev/null
     download_country_mmdb
     systemctl start mihomo
     log_success "Mihomo 已启动"
@@ -1030,6 +1121,7 @@ stop_mihomo() {
 
 restart_mihomo() {
     check_root
+    ensure_controller_secret >/dev/null
     download_country_mmdb
     systemctl restart mihomo
     log_success "Mihomo 已重启"
@@ -1076,6 +1168,7 @@ test_config() {
         log_error "Mihomo 核心不存在：$MIHOMO_BIN"
         exit 1
     fi
+    ensure_controller_secret >/dev/null
     download_country_mmdb
     "$MIHOMO_BIN" -t -d "$MIHOMO_DIR"
 }

@@ -46,10 +46,52 @@
 - Bash 回归测试：`bats-core`
 - YAML 结构化编辑：`yq`
 
-## 阶段 2 预期
+## 阶段 2：高风险网络默认值修复
 
-优先处理高风险运行默认值和运行时行为问题：
+日期：2026-07-05
 
-- 收敛 `mihomo.sh` 默认监听地址，生成或要求管理 secret。
-- 收敛 `a2up.sh` aria2 RPC 默认监听地址，生成或要求 RPC secret。
-- 为上述改动补最小无副作用验证路径。
+### 已完成
+
+- 使用主代理 + 2 个子代理完成 `mihomo.sh` 和 `a2up.sh` 安全默认值审查。
+- `a2up.sh`
+  - 新增 RPC 密钥生成、读取、校验和保留逻辑。
+  - aria2 RPC 默认改为 `rpc-listen-all=false`，仅监听本机。
+  - `install` / `reconfig` 写入配置时始终写入非空 `rpc-secret`。
+  - 扫描服务改用 `0600` 环境文件传递 `ARIA2_RPC_SECRET`，主 aria2 服务不再携带无用密钥环境变量。
+  - `info` 输出对 `rpc-secret` 脱敏。
+  - `doctor` 增加 RPC 本机监听、密钥和扫描服务环境文件检查。
+- `mihomo.sh`
+  - 默认 `external-controller` 改为 `127.0.0.1:9090`。
+  - 新增管理 `secret` 生成、读取、校验和保留逻辑。
+  - 新建默认配置和订阅配置时写入 `secret`，并收紧配置文件权限。
+  - 订阅导入/代理组重生成时保留已有 `external-controller` 和 `secret`。
+  - `port 8899` / `port :8899` 默认展开为 `127.0.0.1:8899`，显式 `0.0.0.0:9090` 仍允许。
+  - 访问信息按实际 controller host 显示，避免本机绑定时误提示服务器 IP。
+- README 同步 aria2 RPC 与 Mihomo Web 管理默认安全策略。
+
+### 验证结果
+
+- `bash -n a2up.sh` 通过。
+- `bash -n mihomo.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+- 静态字符串检查确认旧的不安全默认提示不再存在：
+  - `rpc-listen-all=true`
+  - `RPC 密钥(留空不启用)`
+  - `DEFAULT_CONTROLLER="0.0.0.0:9090"`
+  - README 中的默认 `0.0.0.0:9090`
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck` 和 `shfmt`，可选 lint 被跳过。
+- 未执行 `install`、`reconfig`、`start`、`scan-run` 或 Mihomo 真实配置测试，避免触发 systemd、安装动作或外部网络下载。
+- `mihomo.sh` 不静默迁移已有用户配置中的 `external-controller: 0.0.0.0:9090`，只补齐缺失 `secret`，避免破坏已有远程管理方式。
+- `a2up.sh` 仍允许用户显式设置 `RPC_LISTEN_ALL=true` 后重配置，以兼容确实需要远程 RPC 的场景。
+
+## 阶段 3 预期
+
+优先处理 P1 运行可靠性问题：
+
+- 修复 `mount_webdav.sh` 中 rclone remote 写入用户和 systemd 运行用户不一致的问题。
+- 修复 `cf.sh` service 文件写入未走 `run_root`、URL 写入转义和架构检测问题。
+- 为上述改动补充无副作用验证路径。
