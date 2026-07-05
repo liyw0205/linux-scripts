@@ -7,6 +7,7 @@
 # 修改 external-controller 管理端口
 # 修改 HTTP 代理端口 port
 # 修改 SOCKS5 代理端口 socks-port
+# 启用/移除 SOCKS5 多端口组
 # 自动代理组：AUTO / FALLBACK / LOAD-BALANCE
 # Country.mmdb 自动检测、下载、修复
 
@@ -26,6 +27,7 @@ SERVICE_FILE="/etc/systemd/system/mihomo.service"
 UI_DIR="$MIHOMO_DIR/ui"
 SUB_FILE="$MIHOMO_DIR/subscription.yaml"
 COUNTRY_MMDB="$MIHOMO_DIR/Country.mmdb"
+SOCKS5_GROUP_STATE="$MIHOMO_DIR/socks5_group.conf"
 
 COUNTRY_MMDB_URL="${COUNTRY_MMDB_URL:-https://github.com/Dreamacro/maxmind-geoip/releases/latest/download/Country.mmdb}"
 
@@ -53,21 +55,10 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $*"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $*"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*"
-}
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # =========================
 # 通用函数
@@ -81,7 +72,7 @@ check_root() {
 }
 
 command_exists() {
-    command -v "$1" >/dev/null 2>&1
+    command -v "$1" >/dev 2>&1
 }
 
 detect_os() {
@@ -179,7 +170,6 @@ download_file() {
                 if [ -f "$output" ]; then
                     local size
                     size="$(stat -c%s "$output" 2>/dev/null || echo 0)"
-
                     local type
                     type="$(file "$output" 2>/dev/null || echo unknown)"
 
@@ -235,7 +225,7 @@ get_config_value() {
     local key="$1"
 
     if [ -f "$CONFIG_FILE" ]; then
-        grep -E "^[[:space:]]*${key}:" "$CONFIG_FILE" | head -n1 | awk -F': ' '{print $2}'
+        grep -E "^[[:space:]]*${key}:" "$CONFIG_FILE" | head -n1 | awk -F': ' '{print $2}' | tr -d '"'
     fi
 }
 
@@ -265,7 +255,6 @@ get_socks_port() {
 
 normalize_port_only() {
     local input="$1"
-
     input="$(echo "$input" | tr -d ' ')"
 
     if ! echo "$input" | grep -qE '^[0-9]+$'; then
@@ -283,6 +272,35 @@ normalize_port_only() {
     echo "$input"
 }
 
+normalize_controller() {
+    local input="$1"
+    input="$(echo "$input" | tr -d ' ')"
+
+    if [ -z "$input" ]; then
+        log_error "端口不能为空"
+        exit 1
+    fi
+
+    if echo "$input" | grep -qE '^[0-9]+$'; then
+        echo "0.0.0.0:${input}"
+        return 0
+    fi
+
+    if echo "$input" | grep -qE '^:[0-9]+$'; then
+        echo "0.0.0.0${input}"
+        return 0
+    fi
+
+    if echo "$input" | grep -qE '^[^:]+:[0-9]+$'; then
+        echo "$input"
+        return 0
+    fi
+
+    log_error "管理端口格式错误：$input"
+    log_info "正确示例：8899 / :8899 / 0.0.0.0:8899 / 127.0.0.1:8899"
+    exit 1
+}
+
 ensure_config_exists() {
     if [ ! -f "$CONFIG_FILE" ]; then
         log_warn "配置文件不存在，将创建默认配置"
@@ -290,55 +308,23 @@ ensure_config_exists() {
     fi
 }
 
-test_and_restart() {
-    download_country_mmdb
-
-    if [ -x "$MIHOMO_BIN" ]; then
-        log_info "测试 Mihomo 配置..."
-
-        if "$MIHOMO_BIN" -t -d "$MIHOMO_DIR" >/tmp/mihomo_test.log 2>&1; then
-            log_success "配置测试通过"
-        else
-            log_error "配置测试失败："
-            cat /tmp/mihomo_test.log
-            exit 1
-        fi
-    else
-        log_warn "Mihomo 核心不存在，跳过配置测试：$MIHOMO_BIN"
-    fi
-
-    systemctl restart mihomo 2>/dev/null || true
-}
-
 # =========================
 # Country.mmdb 管理
 # =========================
 
 check_country_mmdb() {
-    if [ ! -f "$COUNTRY_MMDB" ]; then
-        return 1
-    fi
-
+    if [ ! -f "$COUNTRY_MMDB" ]; then return 1; fi
     local size
     size="$(stat -c%s "$COUNTRY_MMDB" 2>/dev/null || echo 0)"
-
-    if [ "$size" -lt 100000 ]; then
-        return 1
-    fi
-
+    [ "$size" -ge 100000 ] || return 1
     local type
     type="$(file "$COUNTRY_MMDB" 2>/dev/null || echo unknown)"
-
-    if echo "$type" | grep -qiE "HTML|XML|text|empty"; then
-        return 1
-    fi
-
+    echo "$type" | grep -qiE "HTML|XML|text|empty" && return 1
     return 0
 }
 
 download_country_mmdb() {
     check_root
-
     mkdir -p "$MIHOMO_DIR"
 
     if check_country_mmdb; then
@@ -350,13 +336,10 @@ download_country_mmdb() {
 
     log_warn "Country.mmdb 不存在或无效，开始下载..."
 
-    rm -f "$COUNTRY_MMDB"
-    rm -f "$MIHOMO_DIR/country.mmdb"
-    rm -f "$MIHOMO_DIR/geoip.metadb"
+    rm -f "$COUNTRY_MMDB" "$MIHOMO_DIR/country.mmdb" "$MIHOMO_DIR/geoip.metadb"
 
     if download_file "$COUNTRY_MMDB_URL" "$COUNTRY_MMDB" "Country.mmdb"; then
         chmod 644 "$COUNTRY_MMDB"
-
         if check_country_mmdb; then
             local size
             size="$(stat -c%s "$COUNTRY_MMDB" 2>/dev/null || echo 0)"
@@ -371,17 +354,205 @@ download_country_mmdb() {
 
 repair_mmdb() {
     check_root
-
     log_info "开始修复 Country.mmdb..."
-
-    rm -f "$COUNTRY_MMDB"
-    rm -f "$MIHOMO_DIR/country.mmdb"
-    rm -f "$MIHOMO_DIR/geoip.metadb"
-
+    rm -f "$COUNTRY_MMDB" "$MIHOMO_DIR/country.mmdb" "$MIHOMO_DIR/geoip.metadb"
     download_country_mmdb
     test_and_restart
-
     log_success "Country.mmdb 修复完成"
+}
+
+# =========================
+# SOCKS5 多端口组
+# =========================
+
+remove_socks5_group_blocks() {
+    if [ -f "$CONFIG_FILE" ]; then
+        sed -i '/MIHOMO SOCKS5 GROUPS BEGIN/,/MIHOMO SOCKS5 GROUPS END/d' "$CONFIG_FILE"
+        sed -i '/MIHOMO SOCKS5 LISTENERS BEGIN/,/MIHOMO SOCKS5 LISTENERS END/d' "$CONFIG_FILE"
+    fi
+}
+
+generate_socks5_blocks() {
+    local count="$1"
+    local base_port="$2"
+    local output="$3"
+
+    {
+        echo "  # MIHOMO SOCKS5 GROUPS BEGIN"
+        local i
+        for ((i=1; i<=count; i++)); do
+            local port=$((base_port + i))
+            cat <<EOF
+  - name: "SOCKS5-${port}"
+    type: select
+    proxies:
+      - PROXY
+      - AUTO
+      - FALLBACK
+      - LOAD-BALANCE
+      - DIRECT
+    use:
+      - subscription
+
+EOF
+        done
+        echo "  # MIHOMO SOCKS5 GROUPS END"
+        echo ""
+        echo "# MIHOMO SOCKS5 LISTENERS BEGIN"
+        echo "listeners:"
+        for ((i=1; i<=count; i++)); do
+            local port=$((base_port + i))
+            cat <<EOF
+  - name: "SOCKS5-${port}"
+    type: socks
+    listen: 0.0.0.0
+    port: ${port}
+    proxy: "SOCKS5-${port}"
+    udp: true
+
+EOF
+        done
+        echo "# MIHOMO SOCKS5 LISTENERS END"
+        echo ""
+    } > "$output"
+}
+
+insert_blocks_before_rules() {
+    local block_file="$1"
+    local tmp_file
+    tmp_file="$(mktemp)"
+
+    awk -v block="$(cat "$block_file")" '
+        BEGIN { inserted = 0 }
+        /^[[:space:]]*rules:/ {
+            if (inserted == 0) { print block; inserted = 1 }
+        }
+        { print }
+        END {
+            if (inserted == 0) {
+                print ""
+                print block
+            }
+        }
+    ' "$CONFIG_FILE" > "$tmp_file"
+
+    mv "$tmp_file" "$CONFIG_FILE"
+}
+
+enable_socks5_group() {
+    check_root
+    ensure_config_exists
+
+    local count="${1:-}"
+    if [ -z "$count" ]; then
+        echo ""
+        echo "当前主 SOCKS5 端口：$(get_socks_port)"
+        read -r -p "请输入要新增的 SOCKS5 端口数量，例如 10：" count
+    fi
+
+    if ! echo "$count" | grep -qE '^[0-9]+$'; then
+        log_error "数量格式错误：$count"
+        exit 1
+    fi
+
+    if [ "$count" -lt 1 ] || [ "$count" -gt 100 ]; then
+        log_error "数量范围错误：$count"
+        log_info "建议范围：1-100"
+        exit 1
+    fi
+
+    local base_port
+    base_port="$(normalize_port_only "$(get_socks_port)")"
+
+    local last_port
+    last_port=$((base_port + count))
+
+    if [ "$last_port" -gt 65535 ]; then
+        log_error "端口超过 65535"
+        exit 1
+    fi
+
+    backup_file "$CONFIG_FILE"
+    remove_socks5_group_blocks
+
+    if grep -qE '^[[:space:]]*listeners:' "$CONFIG_FILE"; then
+        log_error "检测到 config.yaml 中已存在 listeners 配置"
+        log_info "为了避免破坏你已有的配置，脚本暂停自动写入。"
+        log_info "请先手动处理 listeners 后再启用 SOCKS5 多端口组。"
+        exit 1
+    fi
+
+    local block_file
+    block_file="$(mktemp)"
+    generate_socks5_blocks "$count" "$base_port" "$block_file"
+    insert_blocks_before_rules "$block_file"
+    rm -f "$block_file"
+
+    cat > "$SOCKS5_GROUP_STATE" <<EOF
+SOCKS5_GROUP_ENABLED="1"
+SOCKS5_GROUP_COUNT="${count}"
+SOCKS5_GROUP_BASE_PORT="${base_port}"
+SOCKS5_GROUP_LAST_PORT="${last_port}"
+EOF
+
+    test_and_restart
+
+    local ip
+    ip="$(get_server_ip)"
+
+    echo ""
+    echo -e "${CYAN}SOCKS5 独立端口组已启用：${NC}"
+    echo "主 SOCKS5 端口：${ip}:${base_port}"
+    echo ""
+    echo "新增 SOCKS5 端口："
+    local i
+    for ((i=1; i<=count; i++)); do
+        local port=$((base_port + i))
+        echo "  SOCKS5-${port} -> ${ip}:${port}"
+    done
+    echo ""
+    log_info "现在可以在 Web 面板分别给 SOCKS5-端口组选择不同节点"
+}
+
+disable_socks5_group() {
+    check_root
+    ensure_config_exists
+    backup_file "$CONFIG_FILE"
+    remove_socks5_group_blocks
+    rm -f "$SOCKS5_GROUP_STATE"
+    test_and_restart
+    log_success "已移除 SOCKS5 独立端口组"
+}
+
+show_socks5_group_status() {
+    echo ""
+    echo -e "${CYAN}SOCKS5 多端口组状态：${NC}"
+
+    if [ -f "$SOCKS5_GROUP_STATE" ]; then
+        # shellcheck disable=SC1090
+        . "$SOCKS5_GROUP_STATE"
+        echo "  状态：已启用"
+        echo "  主端口：${SOCKS5_GROUP_BASE_PORT:-未知}"
+        echo "  数量：${SOCKS5_GROUP_COUNT:-未知}"
+        echo "  最后端口：${SOCKS5_GROUP_LAST_PORT:-未知}"
+        echo ""
+        local ip
+        ip="$(get_server_ip)"
+        local count="${SOCKS5_GROUP_COUNT:-0}"
+        local base_port="${SOCKS5_GROUP_BASE_PORT:-$(get_socks_port)}"
+        if echo "$count" | grep -qE '^[0-9]+$'; then
+            echo "  端口列表："
+            local i
+            for ((i=1; i<=count; i++)); do
+                local port=$((base_port + i))
+                echo "    SOCKS5-${port} -> ${ip}:${port}"
+            done
+        fi
+    else
+        echo "  状态：未启用"
+        echo "  当前主 SOCKS5 端口：$(get_socks_port)"
+    fi
+    echo ""
 }
 
 # =========================
@@ -390,7 +561,6 @@ repair_mmdb() {
 
 create_default_config() {
     mkdir -p "$MIHOMO_DIR"
-
     if [ -f "$CONFIG_FILE" ]; then
         log_warn "配置文件已存在，跳过生成：$CONFIG_FILE"
         return 0
@@ -543,73 +713,33 @@ rules:
   - MATCH,PROXY
 EOF
 
+    if [ -f "$SOCKS5_GROUP_STATE" ]; then
+        # shellcheck disable=SC1090
+        . "$SOCKS5_GROUP_STATE"
+        if [ -n "${SOCKS5_GROUP_COUNT:-}" ]; then
+            enable_socks5_group "$SOCKS5_GROUP_COUNT"
+            return 0
+        fi
+    fi
+
     log_success "已生成自动选择 / 故障转移 / 负载均衡代理组配置"
 }
 
 # =========================
-# 安装
+# 安装 / 前端 / 订阅
 # =========================
-
-install_mihomo() {
-    check_root
-
-    log_info "开始安装 Mihomo..."
-
-    install_dependencies
-
-    mkdir -p "$MIHOMO_DIR"
-    mkdir -p "$MIHOMO_BIN_DIR"
-
-    if [ -f "$MIHOMO_BIN" ]; then
-        log_warn "检测到已安装 Mihomo：$MIHOMO_BIN"
-        read -r -p "是否覆盖安装核心？[y/N]: " choice
-        choice="${choice:-N}"
-
-        if [[ "$choice" =~ ^[Yy]$ ]]; then
-            systemctl stop mihomo 2>/dev/null || true
-            download_and_install_core
-        else
-            log_info "跳过核心覆盖安装"
-        fi
-    else
-        download_and_install_core
-    fi
-
-    create_default_config
-    download_country_mmdb
-    install_frontend "metacubexd"
-    create_systemd_service
-    create_shortcuts
-
-    systemctl daemon-reload
-    systemctl enable mihomo
-    systemctl restart mihomo
-
-    show_access_info
-
-    log_success "Mihomo 安装完成"
-    log_info "常用命令："
-    log_info "mihomoctl status"
-    log_info "mihomoctl sub"
-    log_info "mihomoctl http 7890"
-    log_info "mihomoctl socks 7891"
-    log_info "mihomoctl port 9090"
-}
 
 download_and_install_core() {
     local arch_file
     arch_file="$(detect_arch_file)"
-
     local url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${arch_file}"
 
     log_info "Mihomo 版本：$MIHOMO_VERSION"
     log_info "核心文件：$arch_file"
 
     download_file "$url" "/tmp/mihomo.gz" "Mihomo 核心"
-
     gunzip -c "/tmp/mihomo.gz" > "$MIHOMO_BIN"
     chmod +x "$MIHOMO_BIN"
-
     rm -f "/tmp/mihomo.gz"
 
     log_success "Mihomo 核心已安装：$MIHOMO_BIN"
@@ -638,65 +768,35 @@ EOF
     log_success "systemd 服务已创建：$SERVICE_FILE"
 }
 
-create_shortcuts() {
-    cp "$(realpath "$0")" /usr/local/bin/mihomo.sh
-    chmod +x /usr/local/bin/mihomo.sh
-
-    cat > /usr/local/bin/mihomoctl <<'EOF'
-#!/usr/bin/env bash
-
-SELF_NAME="$(basename "$0")"
-
-case "$SELF_NAME" in
-    clashon)
-        sudo bash /usr/local/bin/mihomo.sh start "$@"
-        ;;
-    clashoff)
-        sudo bash /usr/local/bin/mihomo.sh stop "$@"
-        ;;
-    clashstatus)
-        sudo bash /usr/local/bin/mihomo.sh status "$@"
-        ;;
-    clashlog)
-        sudo bash /usr/local/bin/mihomo.sh log "$@"
-        ;;
-    clashrestart)
-        sudo bash /usr/local/bin/mihomo.sh restart "$@"
-        ;;
-    clashfrontend)
-        sudo bash /usr/local/bin/mihomo.sh frontend "$@"
-        ;;
-    clashuninstall)
-        sudo bash /usr/local/bin/mihomo.sh uninstall "$@"
-        ;;
-    *)
-        sudo bash /usr/local/bin/mihomo.sh "$@"
-        ;;
-esac
-EOF
-
-    chmod +x /usr/local/bin/mihomoctl
-
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashon
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashoff
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashstatus
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashlog
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashrestart
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashfrontend
-    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashuninstall
-
-    log_success "快捷命令已创建：mihomoctl / clashon / clashoff / clashstatus / clashlog / clashrestart / clashfrontend / clashuninstall"
+install_metacubexd() {
+    log_info "安装 MetaCubeXD 前端..."
+    mkdir -p "$MIHOMO_DIR"
+    rm -rf "$UI_DIR"
+    mkdir -p "$UI_DIR"
+    download_file "$METACUBEXD_DOWNLOAD_URL" "/tmp/metacubexd.tgz" "MetaCubeXD"
+    tar -xzf "/tmp/metacubexd.tgz" -C "$UI_DIR"
+    rm -f "/tmp/metacubexd.tgz"
+    echo "metacubexd" > "$UI_DIR/.frontend_info"
+    echo "MetaCubeXD ${METACUBEXD_VERSION}" > "$UI_DIR/.frontend_version"
+    log_success "MetaCubeXD 安装完成"
 }
 
-# =========================
-# 前端管理
-# =========================
+install_zashboard() {
+    log_info "安装 Zashboard 前端..."
+    mkdir -p "$MIHOMO_DIR"
+    rm -rf "$UI_DIR"
+    mkdir -p "$UI_DIR"
+    download_file "$ZASHBOARD_DOWNLOAD_URL" "/tmp/zashboard.zip" "Zashboard"
+    unzip -q "/tmp/zashboard.zip" -d "$UI_DIR"
+    rm -f "/tmp/zashboard.zip"
+    echo "zashboard" > "$UI_DIR/.frontend_info"
+    echo "Zashboard ${ZASHBOARD_VERSION}" > "$UI_DIR/.frontend_version"
+    log_success "Zashboard 安装完成"
+}
 
 install_frontend() {
     check_root
-
     local frontend="${1:-}"
-
     if [ -z "$frontend" ]; then
         echo ""
         echo -e "${CYAN}请选择前端：${NC}"
@@ -705,7 +805,6 @@ install_frontend() {
         echo ""
         read -r -p "请输入选择 [1-2]，默认 1：" choice
         choice="${choice:-1}"
-
         case "$choice" in
             1) frontend="metacubexd" ;;
             2) frontend="zashboard" ;;
@@ -714,83 +813,30 @@ install_frontend() {
     fi
 
     case "$frontend" in
-        metacubexd|meta|1)
-            install_metacubexd
-            ;;
-        zashboard|zash|2)
-            install_zashboard
-            ;;
-        *)
-            log_error "不支持的前端：$frontend"
-            log_info "支持：metacubexd / zashboard"
-            exit 1
-            ;;
+        metacubexd|meta|1) install_metacubexd ;;
+        zashboard|zash|2) install_zashboard ;;
+        *) log_error "不支持的前端：$frontend"; exit 1 ;;
     esac
 
     restart_if_running
 }
 
-install_metacubexd() {
-    log_info "安装 MetaCubeXD 前端..."
-
-    mkdir -p "$MIHOMO_DIR"
-    rm -rf "$UI_DIR"
-    mkdir -p "$UI_DIR"
-
-    download_file "$METACUBEXD_DOWNLOAD_URL" "/tmp/metacubexd.tgz" "MetaCubeXD"
-
-    tar -xzf "/tmp/metacubexd.tgz" -C "$UI_DIR"
-    rm -f "/tmp/metacubexd.tgz"
-
-    echo "metacubexd" > "$UI_DIR/.frontend_info"
-    echo "MetaCubeXD ${METACUBEXD_VERSION}" > "$UI_DIR/.frontend_version"
-
-    log_success "MetaCubeXD 安装完成"
-}
-
-install_zashboard() {
-    log_info "安装 Zashboard 前端..."
-
-    mkdir -p "$MIHOMO_DIR"
-    rm -rf "$UI_DIR"
-    mkdir -p "$UI_DIR"
-
-    download_file "$ZASHBOARD_DOWNLOAD_URL" "/tmp/zashboard.zip" "Zashboard"
-
-    unzip -q "/tmp/zashboard.zip" -d "$UI_DIR"
-    rm -f "/tmp/zashboard.zip"
-
-    echo "zashboard" > "$UI_DIR/.frontend_info"
-    echo "Zashboard ${ZASHBOARD_VERSION}" > "$UI_DIR/.frontend_version"
-
-    log_success "Zashboard 安装完成"
-}
-
 show_frontend_info() {
     local current="unknown"
     local version="unknown"
-
     [ -f "$UI_DIR/.frontend_info" ] && current="$(cat "$UI_DIR/.frontend_info")"
     [ -f "$UI_DIR/.frontend_version" ] && version="$(cat "$UI_DIR/.frontend_version")"
-
     echo -e "${CYAN}当前前端：${NC}${current}"
     echo -e "${CYAN}前端版本：${NC}${version}"
     echo -e "${CYAN}前端目录：${NC}${UI_DIR}"
 }
 
-# =========================
-# 订阅导入
-# =========================
-
 import_subscription() {
     check_root
-
     mkdir -p "$MIHOMO_DIR"
 
     local url="${1:-}"
-
     if [ -z "$url" ]; then
-        echo ""
         read -r -p "请输入订阅链接：" url
     fi
 
@@ -800,16 +846,9 @@ import_subscription() {
     fi
 
     log_info "开始下载订阅..."
-
     backup_file "$SUB_FILE"
 
-    if ! curl -fL \
-        --connect-timeout 10 \
-        --max-time 120 \
-        -A "Clash Verge" \
-        -H "User-Agent: Clash Verge" \
-        -o "$SUB_FILE.tmp" \
-        "$url"; then
+    if ! curl -fL --connect-timeout 10 --max-time 120 -A "Clash Verge" -H "User-Agent: Clash Verge" -o "$SUB_FILE.tmp" "$url"; then
         log_error "订阅下载失败"
         rm -f "$SUB_FILE.tmp"
         exit 1
@@ -817,7 +856,6 @@ import_subscription() {
 
     local size
     size="$(stat -c%s "$SUB_FILE.tmp" 2>/dev/null || echo 0)"
-
     if [ "$size" -lt 20 ]; then
         log_error "订阅文件过小，可能无效"
         rm -f "$SUB_FILE.tmp"
@@ -831,28 +869,22 @@ import_subscription() {
     fi
 
     mv "$SUB_FILE.tmp" "$SUB_FILE"
-
     log_success "订阅已保存：$SUB_FILE"
 
     create_subscription_config
     test_and_restart
-
     log_success "订阅导入完成，Mihomo 已重启"
     show_access_info
 }
 
 regenerate_proxy_groups() {
     check_root
-
     if [ ! -f "$SUB_FILE" ]; then
         log_error "订阅文件不存在：$SUB_FILE"
-        log_info "请先导入订阅：sudo bash mihomo.sh sub"
         exit 1
     fi
-
     create_subscription_config
     test_and_restart
-
     log_success "已重新生成代理组并重启 Mihomo"
 }
 
@@ -860,41 +892,9 @@ regenerate_proxy_groups() {
 # 端口修改
 # =========================
 
-normalize_controller() {
-    local input="$1"
-
-    input="$(echo "$input" | tr -d ' ')"
-
-    if [ -z "$input" ]; then
-        log_error "端口不能为空"
-        exit 1
-    fi
-
-    if echo "$input" | grep -qE '^[0-9]+$'; then
-        echo "0.0.0.0:${input}"
-        return 0
-    fi
-
-    if echo "$input" | grep -qE '^:[0-9]+$'; then
-        echo "0.0.0.0${input}"
-        return 0
-    fi
-
-    if echo "$input" | grep -qE '^[^:]+:[0-9]+$'; then
-        echo "$input"
-        return 0
-    fi
-
-    log_error "管理端口格式错误：$input"
-    log_info "正确示例：8899 / :8899 / 0.0.0.0:8899 / 127.0.0.1:8899"
-    exit 1
-}
-
 change_controller_port() {
     check_root
-
     local input="${1:-}"
-
     if [ -z "$input" ]; then
         local current
         current="$(get_controller_from_config)"
@@ -916,16 +916,13 @@ change_controller_port() {
     fi
 
     log_success "external-controller 已修改为：$controller"
-
     test_and_restart
     show_access_info
 }
 
 change_http_port() {
     check_root
-
     local input="${1:-}"
-
     if [ -z "$input" ]; then
         local current
         current="$(get_http_port)"
@@ -947,17 +944,13 @@ change_http_port() {
     fi
 
     log_success "HTTP 代理端口 port 已修改为：$port"
-
     test_and_restart
-
     log_info "HTTP 代理地址：http://$(get_server_ip):${port}"
 }
 
 change_socks_port() {
     check_root
-
     local input="${1:-}"
-
     if [ -z "$input" ]; then
         local current
         current="$(get_socks_port)"
@@ -979,9 +972,7 @@ change_socks_port() {
     fi
 
     log_success "SOCKS5 代理端口 socks-port 已修改为：$port"
-
     test_and_restart
-
     log_info "SOCKS5 代理地址：$(get_server_ip):${port}"
 }
 
@@ -989,37 +980,25 @@ change_socks_port() {
 # 服务管理
 # =========================
 
-start_mihomo() {
-    check_root
+test_and_restart() {
     download_country_mmdb
-    systemctl start mihomo
-    log_success "Mihomo 已启动"
-    show_access_info
-}
-
-stop_mihomo() {
-    check_root
-    systemctl stop mihomo
-    log_success "Mihomo 已停止"
-
-    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY || true
-    log_info "当前会话代理环境变量已清理"
-}
-
-restart_mihomo() {
-    check_root
-    download_country_mmdb
-    systemctl restart mihomo
-    log_success "Mihomo 已重启"
-    show_access_info
+    if [ -x "$MIHOMO_BIN" ]; then
+        log_info "测试 Mihomo 配置..."
+        if "$MIHOMO_BIN" -t -d "$MIHOMO_DIR" >/tmp/mihomo_test.log 2>&1; then
+            log_success "配置测试通过"
+        else
+            log_error "配置测试失败："
+            cat /tmp/mihomo_test.log
+            exit 1
+        fi
+    else
+        log_warn "Mihomo 核心不存在，跳过配置测试：$MIHOMO_BIN"
+    fi
+    systemctl restart mihomo 2>/dev/null || true
 }
 
 show_access_info() {
-    local ip
-    local http_port
-    local socks_port
-    local controller_port
-
+    local ip http_port socks_port controller_port
     ip="$(get_server_ip)"
     http_port="$(get_http_port)"
     socks_port="$(get_socks_port)"
@@ -1033,12 +1012,34 @@ show_access_info() {
     echo ""
 }
 
+start_mihomo() {
+    check_root
+    download_country_mmdb
+    systemctl start mihomo
+    log_success "Mihomo 已启动"
+    show_access_info
+}
+
+stop_mihomo() {
+    check_root
+    systemctl stop mihomo
+    log_success "Mihomo 已停止"
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY || true
+    log_info "当前会话代理环境变量已清理"
+}
+
+restart_mihomo() {
+    check_root
+    download_country_mmdb
+    systemctl restart mihomo
+    log_success "Mihomo 已重启"
+    show_access_info
+}
+
 status_mihomo() {
     systemctl status mihomo --no-pager || true
-
     echo ""
     echo -e "${CYAN}端口监听：${NC}"
-
     if command_exists ss; then
         ss -tlnp | grep -E "mihomo|:$(get_http_port)|:$(get_socks_port)|:$(get_controller_port)" || true
     elif command_exists netstat; then
@@ -1061,6 +1062,8 @@ status_mihomo() {
     if [ -f "$CONFIG_FILE" ]; then
         grep -E '^[[:space:]]*- name:' "$CONFIG_FILE" || true
     fi
+
+    show_socks5_group_status
 }
 
 log_mihomo() {
@@ -1069,12 +1072,10 @@ log_mihomo() {
 
 test_config() {
     check_root
-
     if [ ! -x "$MIHOMO_BIN" ]; then
         log_error "Mihomo 核心不存在：$MIHOMO_BIN"
         exit 1
     fi
-
     download_country_mmdb
     "$MIHOMO_BIN" -t -d "$MIHOMO_DIR"
 }
@@ -1085,7 +1086,6 @@ test_config() {
 
 uninstall_mihomo() {
     check_root
-
     echo -e "${YELLOW}警告：即将卸载 Mihomo，并删除以下内容：${NC}"
     echo "  - $MIHOMO_DIR"
     echo "  - $MIHOMO_BIN_DIR"
@@ -1094,10 +1094,8 @@ uninstall_mihomo() {
     echo "  - /usr/local/bin/mihomo.sh"
     echo "  - /usr/local/bin/clashon 等快捷命令"
     echo ""
-
     read -r -p "确定卸载？[y/N]: " choice
     choice="${choice:-N}"
-
     if [[ ! "$choice" =~ ^[Yy]$ ]]; then
         log_info "已取消卸载"
         exit 0
@@ -1105,22 +1103,13 @@ uninstall_mihomo() {
 
     systemctl stop mihomo 2>/dev/null || true
     systemctl disable mihomo 2>/dev/null || true
-
     rm -f "$SERVICE_FILE"
     systemctl daemon-reload
 
-    rm -rf "$MIHOMO_DIR"
-    rm -rf "$MIHOMO_BIN_DIR"
-
-    rm -f /usr/local/bin/mihomoctl
-    rm -f /usr/local/bin/mihomo.sh
-    rm -f /usr/local/bin/clashon
-    rm -f /usr/local/bin/clashoff
-    rm -f /usr/local/bin/clashstatus
-    rm -f /usr/local/bin/clashlog
-    rm -f /usr/local/bin/clashrestart
-    rm -f /usr/local/bin/clashfrontend
-    rm -f /usr/local/bin/clashuninstall
+    rm -rf "$MIHOMO_DIR" "$MIHOMO_BIN_DIR"
+    rm -f /usr/local/bin/mihomoctl /usr/local/bin/mihomo.sh
+    rm -f /usr/local/bin/clashon /usr/local/bin/clashoff /usr/local/bin/clashstatus /usr/local/bin/clashlog
+    rm -f /usr/local/bin/clashrestart /usr/local/bin/clashfrontend /usr/local/bin/clashuninstall
 
     log_success "Mihomo 已卸载完成"
 }
@@ -1131,7 +1120,6 @@ uninstall_mihomo() {
 
 show_menu() {
     clear || true
-
     echo -e "${CYAN}================================${NC}"
     echo -e "${CYAN}       Mihomo 一体化管理脚本${NC}"
     echo -e "${CYAN}================================${NC}"
@@ -1151,7 +1139,10 @@ show_menu() {
     echo " 13) 测试配置"
     echo " 14) 重新生成自动/均衡代理组"
     echo " 15) 修复/下载 Country.mmdb"
-    echo " 16) 卸载 Mihomo"
+    echo " 16) 启用 SOCKS5 多端口组"
+    echo " 17) 移除 SOCKS5 多端口组"
+    echo " 18) 查看 SOCKS5 多端口组状态"
+    echo " 19) 卸载 Mihomo"
     echo "  0) 退出"
     echo ""
 }
@@ -1160,7 +1151,6 @@ interactive_menu() {
     while true; do
         show_menu
         read -r -p "请输入选项：" choice
-
         case "$choice" in
             1) install_mihomo ;;
             2) start_mihomo ;;
@@ -1177,11 +1167,13 @@ interactive_menu() {
             13) test_config ;;
             14) regenerate_proxy_groups ;;
             15) repair_mmdb ;;
-            16) uninstall_mihomo ;;
+            16) enable_socks5_group ;;
+            17) disable_socks5_group ;;
+            18) show_socks5_group_status ;;
+            19) uninstall_mihomo ;;
             0) exit 0 ;;
             *) log_error "无效选项" ;;
         esac
-
         echo ""
         read -r -p "按回车继续..."
     done
@@ -1209,36 +1201,28 @@ Mihomo 一体化管理脚本
 订阅：
   sub [订阅链接]              导入订阅并生成自动代理组
   subscription [订阅链接]     同 sub
-  groups                     重新生成自动选择、故障转移、负载均衡代理组
+  groups                      重新生成自动选择、故障转移、负载均衡代理组
 
 端口：
   port [端口或地址]           修改 Web 管理端口 external-controller
-                             示例：
-                               sudo bash mihomo.sh port 8899
-                               sudo bash mihomo.sh port :8899
-                               sudo bash mihomo.sh port 0.0.0.0:8899
-
   http [端口]                 修改 HTTP 代理端口 port
-                             示例：
-                               sudo bash mihomo.sh http 7890
-
   socks [端口]                修改 SOCKS5 代理端口 socks-port
-                             示例：
-                               sudo bash mihomo.sh socks 7891
+
+SOCKS5 多端口组：
+  socks-group on [数量]       启用多个 SOCKS5 独立端口
+  socks-group off             移除新增的 SOCKS5 独立端口
+  socks-group status          查看 SOCKS5 多端口组状态
 
 前端：
   frontend [名称]             切换前端
-                             示例：
-                               sudo bash mihomo.sh frontend metacubexd
-                               sudo bash mihomo.sh frontend zashboard
-  frontend-info              查看当前前端
+  frontend-info               查看当前前端
 
 数据库：
-  mmdb                       修复/下载 Country.mmdb
+  mmdb                        修复/下载 Country.mmdb
 
 菜单：
-  menu                       打开交互菜单
-  help                       显示帮助
+  menu                        打开交互菜单
+  help                        显示帮助
 
 安装后的快捷命令：
   mihomoctl status
@@ -1246,6 +1230,8 @@ Mihomo 一体化管理脚本
   mihomoctl port 8899
   mihomoctl http 7890
   mihomoctl socks 7891
+  mihomoctl socks-group on 10
+  mihomoctl socks-group off
   mihomoctl mmdb
   mihomoctl frontend zashboard
 
@@ -1258,90 +1244,128 @@ Mihomo 一体化管理脚本
   clashfrontend
   clashuninstall
 
-代理组说明：
-  PROXY         手动选择入口
-  AUTO          自动测速选择最低延迟节点
-  FALLBACK      故障转移
-  LOAD-BALANCE  负载均衡，round-robin
-  DIRECT        直连
-
 EOF
 }
 
 # =========================
-# 入口
+# 安装总流程
 # =========================
+
+install_mihomo() {
+    check_root
+    log_info "开始安装 Mihomo..."
+    install_dependencies
+    mkdir -p "$MIHOMO_DIR" "$MIHOMO_BIN_DIR"
+
+    if [ -f "$MIHOMO_BIN" ]; then
+        log_warn "检测到已安装 Mihomo：$MIHOMO_BIN"
+        read -r -p "是否覆盖安装核心？[y/N]: " choice
+        choice="${choice:-N}"
+        if [[ "$choice" =~ ^[Yy]$ ]]; then
+            systemctl stop mihomo 2>/dev/null || true
+            download_and_install_core
+        else
+            log_info "跳过核心覆盖安装"
+        fi
+    else
+        download_and_install_core
+    fi
+
+    create_default_config
+    download_country_mmdb
+    install_frontend "metacubexd"
+    create_systemd_service
+    create_shortcuts
+
+    systemctl daemon-reload
+    systemctl enable mihomo
+    systemctl restart mihomo
+
+    show_access_info
+    log_success "Mihomo 安装完成"
+}
+
+create_shortcuts() {
+    cp "$(realpath "$0")" /usr/local/bin/mihomo.sh
+    chmod +x /usr/local/bin/mihomo.sh
+
+    cat > /usr/local/bin/mihomoctl <<'EOF'
+#!/usr/bin/env bash
+SELF_NAME="$(basename "$0")"
+
+case "$SELF_NAME" in
+    clashon) sudo bash /usr/local/bin/mihomo.sh start "$@" ;;
+    clashoff) sudo bash /usr/local/bin/mihomo.sh stop "$@" ;;
+    clashstatus) sudo bash /usr/local/bin/mihomo.sh status "$@" ;;
+    clashlog) sudo bash /usr/local/bin/mihomo.sh log "$@" ;;
+    clashrestart) sudo bash /usr/local/bin/mihomo.sh restart "$@" ;;
+    clashfrontend) sudo bash /usr/local/bin/mihomo.sh frontend "$@" ;;
+    clashuninstall) sudo bash /usr/local/bin/mihomo.sh uninstall "$@" ;;
+    *) sudo bash /usr/local/bin/mihomo.sh "$@" ;;
+esac
+EOF
+
+    chmod +x /usr/local/bin/mihomoctl
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashon
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashoff
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashstatus
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashlog
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashrestart
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashfrontend
+    ln -sf /usr/local/bin/mihomoctl /usr/local/bin/clashuninstall
+
+    log_success "快捷命令已创建"
+}
 
 main() {
     local cmd="${1:-menu}"
 
     case "$cmd" in
-        install)
-            install_mihomo
-            ;;
-        uninstall|remove)
-            uninstall_mihomo
+        install) install_mihomo ;;
+        uninstall|remove) uninstall_mihomo ;;
+
+        start|on|clashon) start_mihomo ;;
+        stop|off|clashoff) stop_mihomo ;;
+        restart|reload|clashrestart) restart_mihomo ;;
+        status|clashstatus) status_mihomo ;;
+        log|logs|clashlog) log_mihomo ;;
+        test) test_config ;;
+
+        mmdb|geoip|country|repair-mmdb) repair_mmdb ;;
+
+        sub|subscription|import-sub) import_subscription "${2:-}" ;;
+        groups|proxy-groups|regenerate-groups) regenerate_proxy_groups ;;
+
+        port|controller|change-port) change_controller_port "${2:-}" ;;
+        http|http-port|change-http) change_http_port "${2:-}" ;;
+        socks|socks-port|change-socks) change_socks_port "${2:-}" ;;
+
+        socks-group|socks5-group|socket5-group)
+            case "${2:-}" in
+                on|enable|add|start)
+                    enable_socks5_group "${3:-}"
+                    ;;
+                off|disable|remove|stop)
+                    disable_socks5_group
+                    ;;
+                status|info)
+                    show_socks5_group_status
+                    ;;
+                *)
+                    echo "用法："
+                    echo "  sudo bash mihomo.sh socks-group on 10"
+                    echo "  sudo bash mihomo.sh socks-group off"
+                    echo "  sudo bash mihomo.sh socks-group status"
+                    exit 1
+                    ;;
+            esac
             ;;
 
-        start|on|clashon)
-            start_mihomo
-            ;;
-        stop|off|clashoff)
-            stop_mihomo
-            ;;
-        restart|reload|clashrestart)
-            restart_mihomo
-            ;;
-        status|clashstatus)
-            status_mihomo
-            ;;
-        log|logs|clashlog)
-            log_mihomo
-            ;;
-        test)
-            test_config
-            ;;
-
-        mmdb|geoip|country|repair-mmdb)
-            repair_mmdb
-            ;;
-
-        sub|subscription|import-sub)
-            import_subscription "${2:-}"
-            ;;
-        groups|proxy-groups|regenerate-groups)
-            regenerate_proxy_groups
-            ;;
-
-        port|controller|change-port)
-            change_controller_port "${2:-}"
-            ;;
-        http|http-port|change-http)
-            change_http_port "${2:-}"
-            ;;
-        socks|socks-port|change-socks)
-            change_socks_port "${2:-}"
-            ;;
-
-        frontend|ui)
-            install_frontend "${2:-}"
-            ;;
-        frontend-info|ui-info)
-            show_frontend_info
-            ;;
-
-        menu)
-            interactive_menu
-            ;;
-        help|-h|--help)
-            show_help
-            ;;
-        *)
-            log_error "未知命令：$cmd"
-            echo ""
-            show_help
-            exit 1
-            ;;
+        frontend|ui) install_frontend "${2:-}" ;;
+        frontend-info|ui-info) show_frontend_info ;;
+        menu) interactive_menu ;;
+        help|-h|--help) show_help ;;
+        *) log_error "未知命令：$cmd"; echo ""; show_help; exit 1 ;;
     esac
 }
 
