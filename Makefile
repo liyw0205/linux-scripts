@@ -1,14 +1,19 @@
-.PHONY: help validate lint format
+.PHONY: help validate lint format test
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
-		'  make validate  Run bash syntax checks and optional linters' \
+		'  make validate  Run bash syntax checks, optional linters, and regression tests' \
 		'  make lint      Treat optional linter findings as failures' \
-		'  make format    Format shell scripts with shfmt'
+		'  make format    Format shell scripts with shfmt' \
+		'  make test      Run regression tests'
 
 validate:
 	bash scripts/validate.sh
+	bash scripts/test.sh
+
+test:
+	bash scripts/test.sh
 
 lint:
 	bash scripts/validate.sh --strict

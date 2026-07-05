@@ -168,13 +168,57 @@
 - `webdav_copyto_relay.sh` 的 JSON 字段解析仍保持无新增依赖实现；后续如允许引入成熟工具，可优先接入可选 `jq`。
 - `cf.sh` 配置写入失败回滚尚未处理，建议放入阶段 5。
 
-## 阶段 5 预期
+## 阶段 5：本地写入回滚和回归测试沉淀
 
-继续处理剩余可靠性和测试覆盖问题：
+日期：2026-07-05
 
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `cf.sh`、`mihomo.sh` 和 `webdav_copyto_relay.sh` 测试沉淀审查。
 - `cf.sh`
-  - 检查并修复配置写入失败时的回滚行为，避免留下半写入 yml/service。
+  - service 文件写入改为同目录临时文件 + `mv` 原子替换，不再直接 `tee` 到最终文件。
+  - yml 写入补充显式失败清理和返回值，便于上层捕获。
+  - 新增本地 yml/service bundle 写入 helper：写入前备份旧文件，任一写入失败则恢复旧 yml/service；原先不存在的文件会删除。
+  - `create`、`sync`、`rename` 改用 bundle 写入，避免 yml 成功但 service 失败时留下半更新状态。
+  - `rename` 改为新本地文件写入成功后再删除旧本地文件，降低远端 rename 后本地断裂风险。
+  - `delete` 改为远程删除成功后再删除本地 yml/service/credentials，远程失败时保留本地配置便于重试。
+  - `set-url`、`repair` 显式检查配置写入失败并报错。
 - `mihomo.sh`
-  - 评估引入可选 `yq` / `python` YAML 解析路径；成熟工具存在时优先复用，缺失时保留当前 awk fallback。
+  - 新增可选 YAML 工具探测：优先识别 Mike Farah `yq` v4。
+  - 顶层 scalar 读取改为 `yq v4 -> python3 + PyYAML -> awk fallback`。
+  - 顶层 scalar 写入改为 `yq v4 -> awk fallback`；不默认用 PyYAML 写回整文件，避免丢注释或重排用户配置。
+  - `port` / `socks-port` 在 `yq` 路径保持整数写入，`secret` / `external-controller` 保持字符串写入。
+  - 增加 `BASH_SOURCE` 入口保护，便于无副作用 source helper。
 - `webdav_copyto_relay.sh`
-  - 增加更完整的 fake `rclone` 回归测试脚本，后续可接入 `bats-core`。
+  - 修复后台 worker PID 记录/清理：避免命令替换子 shell PID 导致快速完成任务留下 stale `task.pid`。
+  - 增加 `BASH_SOURCE` 无需调整的 fake `rclone` 回归测试覆盖：同大小 skip、不触发 copyto；stop 终止活跃 copyto 并清理 PID。
+- 测试工程化
+  - 新增 `scripts/test.sh`，有 `bats` 时运行 bats 包装；缺失时使用 Bash fallback。
+  - 新增 `tests/webdav_copyto_relay_regression.sh`、`tests/webdav_copyto_relay.bats` 和 fake `rclone` / `sudo` fixture。
+  - 新增 `tests/cf_local_writes_regression.sh`，验证本地 yml/service bundle 写入失败时能恢复旧文件。
+  - 新增 `tests/mihomo_yaml_helpers_regression.sh`，验证 awk fallback 只修改顶层 YAML key 并折叠重复顶层 key。
+  - `make validate` 现在同时运行语法检查、可选 lint 和回归测试；新增 `make test` 单独运行回归测试。
+
+### 验证结果
+
+- `bash -n cf.sh` 通过。
+- `bash -n mihomo.sh` 通过。
+- `bash -n webdav_copyto_relay.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试走 Bash fallback。
+- 未执行真实 cloudflared 登录、Tunnel 创建/删除/重命名、systemd 启停、Mihomo 重启或 rclone WebDAV 传输。
+- `cf.sh create` 若远程 tunnel 创建成功但本地文件写入失败，目前只保证本地文件回滚，不自动删除远程 tunnel，避免引入新的远程失败路径。
+- `mihomo.sh` 的复杂 YAML block 仍由模板和 marker 文本逻辑管理；阶段 5 仅收敛顶层 scalar helper。
+
+## 阶段 6 预期
+
+继续处理测试覆盖和脚本一致性：
+
+- 将 `cf.sh` 的 `set-url`、`repair`、`delete` 顺序调整沉淀为更完整的 fake cloudflared / fake systemctl 测试。
+- 评估为 `a2up.sh`、`mount_webdav.sh`、`cf.sh` 的关键配置写入路径增加同类无副作用回归测试。
+- 若后续环境允许安装成熟工具，接入 `shellcheck`、`shfmt`、`bats-core` 到本地开发说明和严格验证路径。

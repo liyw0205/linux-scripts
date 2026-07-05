@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${FAKE_RCLONE_ROOT:?FAKE_RCLONE_ROOT is required}"
+mode="${FAKE_RCLONE_MODE:-skip}"
+
+log_call() {
+  printf '%s\n' "$*" >> "$root/rclone.calls"
+}
+
+log_call "$*"
+
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  lsd)
+    exit 0
+    ;;
+  lsf)
+    args=" $* "
+    if [[ "$args" == *" -R "* ]]; then
+      case "$mode" in
+        skip) printf '%s\n' "same.bin" ;;
+        stop) printf '%s\n' "slow.bin" ;;
+        *) printf '%s\n' "file.bin" ;;
+      esac
+      exit 0
+    fi
+
+    if [[ "$args" != *" --files-only "* ]]; then
+      exit 0
+    fi
+
+    if [[ "$mode" == "skip" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  size)
+    printf '%s\n' '{"bytes":11}'
+    exit 0
+    ;;
+  lsjson)
+    printf '%s\n' '{"Size":11}'
+    exit 0
+    ;;
+  copyto)
+    printf '%s\n' "$$" >> "$root/copyto.pids"
+    : > "$root/copyto.started"
+    exec sleep 300
+    ;;
+  *)
+    exit 0
+    ;;
+esac

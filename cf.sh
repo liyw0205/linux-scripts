@@ -268,6 +268,70 @@ read_url_from_yml() {
     read_yaml_value "$cfg" "url"
 }
 
+backup_user_file() {
+    local file="$1"
+    local backup=""
+
+    if [[ -f "$file" ]]; then
+        backup="$(mktemp "${TMP_ROOT%/}/cf-user-backup.XXXXXX")" || return 1
+        cp -p "$file" "$backup" || {
+            rm -f "$backup"
+            return 1
+        }
+    fi
+
+    printf '%s\n' "$backup"
+}
+
+restore_user_file() {
+    local file="$1"
+    local backup="${2:-}"
+
+    if [[ -n "$backup" ]]; then
+        mkdir -p "$(dirname "$file")"
+        mv "$backup" "$file"
+    else
+        rm -f "$file"
+    fi
+}
+
+cleanup_user_backup() {
+    local backup="${1:-}"
+    [[ -n "$backup" ]] && rm -f "$backup"
+}
+
+backup_root_file() {
+    local file="$1"
+    local backup=""
+
+    if run_root test -f "$file"; then
+        backup="$(mktemp "${TMP_ROOT%/}/cf-root-backup.XXXXXX")" || return 1
+        run_root cp -p "$file" "$backup" || {
+            rm -f "$backup"
+            return 1
+        }
+    fi
+
+    printf '%s\n' "$backup"
+}
+
+restore_root_file() {
+    local file="$1"
+    local backup="${2:-}"
+
+    if [[ -n "$backup" ]]; then
+        run_root mkdir -p "$(dirname "$file")"
+        run_root install -m 0644 "$backup" "$file"
+    else
+        run_root rm -f "$file"
+    fi
+}
+
+cleanup_root_backup() {
+    local backup="${1:-}"
+    [[ -n "$backup" ]] && run_root rm -f "$backup"
+}
+
 # ================== 运行清理 ==================
 collect_tunnel_pids() {
     local cfg="$1"
@@ -365,21 +429,31 @@ write_tunnel_yml() {
     local cred="${4:-${CLOUDFLARED_HOME}/${tunnel_id}.json}"
     local cfg="${CLOUDFLARED_HOME}/${name}.yml"
     local tmp
-    tmp="$(mktemp "${CLOUDFLARED_HOME}/.${name}.yml.XXXXXX")"
-    cat > "$tmp" <<EOF
+    mkdir -p "$CLOUDFLARED_HOME"
+    tmp="$(mktemp "${CLOUDFLARED_HOME}/.${name}.yml.XXXXXX")" || return 1
+    if ! cat > "$tmp" <<EOF
 url: $(yaml_quote "$url")
 tunnel: $(yaml_quote "$tunnel_id")
 credentials-file: $(yaml_quote "$cred")
 EOF
-    mv "$tmp" "$cfg"
+    then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! mv "$tmp" "$cfg"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    chmod 600 "$cfg" 2>/dev/null || true
 }
 
 write_service_file() {
     local name="$1"
-    local svc_file
+    local svc_file tmp
     svc_file="$(service_file "$name")"
     run_root mkdir -p "$SERVICE_DIR"
-    run_root tee "$svc_file" >/dev/null <<EOF
+    tmp="$(run_root mktemp "${SERVICE_DIR}/.${name}.service.XXXXXX")" || return 1
+    if ! run_root tee "$tmp" >/dev/null <<EOF
 [Unit]
 Description=Cloudflare Tunnel (${name})
 After=network-online.target
@@ -394,7 +468,45 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 EOF
-    run_root chmod 0644 "$svc_file"
+    then
+        run_root rm -f "$tmp"
+        return 1
+    fi
+    if ! run_root chmod 0644 "$tmp" || ! run_root mv "$tmp" "$svc_file"; then
+        run_root rm -f "$tmp"
+        return 1
+    fi
+}
+
+write_local_tunnel_files() {
+    local name="$1"
+    local tunnel_id="$2"
+    local url="$3"
+    local cred="${4:-${CLOUDFLARED_HOME}/${tunnel_id}.json}"
+    local cfg svc_file cfg_backup svc_backup
+
+    cfg="${CLOUDFLARED_HOME}/${name}.yml"
+    svc_file="$(service_file "$name")"
+    if ! cfg_backup="$(backup_user_file "$cfg")"; then
+        return 1
+    fi
+    if ! svc_backup="$(backup_root_file "$svc_file")"; then
+        cleanup_user_backup "$cfg_backup"
+        return 1
+    fi
+
+    if write_tunnel_yml "$name" "$tunnel_id" "$url" "$cred" && write_service_file "$name"; then
+        cleanup_user_backup "$cfg_backup"
+        cleanup_root_backup "$svc_backup"
+        return 0
+    fi
+
+    error "本地配置/服务写入失败，开始回滚: $name"
+    restore_user_file "$cfg" "$cfg_backup" || true
+    restore_root_file "$svc_file" "$svc_backup" || true
+    cleanup_user_backup "$cfg_backup"
+    cleanup_root_backup "$svc_backup"
+    return 1
 }
 
 # ================== 命令 ==================
@@ -456,8 +568,7 @@ create_cmd() {
     done
     [[ -n "$tunnel_id" ]] || abort "创建成功但未拿到 tunnel id"
 
-    write_tunnel_yml "$name" "$tunnel_id" "$url"
-    write_service_file "$name"
+    write_local_tunnel_files "$name" "$tunnel_id" "$url" || abort "本地配置/服务写入失败: $name"
 
     ui_print "已创建隧道: $name"
     echo "ID: $tunnel_id"
@@ -492,18 +603,17 @@ delete_cmd() {
 
         stop_local_tunnel_runtime "$name"
 
-        if [[ -f "$svc_file" ]]; then
-            run_root rm -f "$svc_file"
-            run_root systemctl daemon-reload
-        fi
-
-        [[ -f "$cfg" ]] && rm -f "$cfg"
-        [[ -n "$cred" && -f "$cred" ]] && rm -f "$cred"
-
         if delete_tunnel_with_retry "$tunnel_id" "$name"; then
+            if [[ -f "$svc_file" ]]; then
+                run_root rm -f "$svc_file"
+                run_root systemctl daemon-reload
+            fi
+
+            [[ -f "$cfg" ]] && rm -f "$cfg"
+            [[ -n "$cred" && -f "$cred" ]] && rm -f "$cred"
             ui_print "已删除隧道: $name"
         else
-            abort "删除失败: $name"
+            abort "删除失败，已保留本地配置以便重试: $name"
         fi
     done
 }
@@ -546,16 +656,15 @@ rename_cmd() {
         c="$(read_credentials_from_yml "$old_cfg" || true)"
         [[ -n "${u:-}" ]] && url="$u"
         [[ -n "${c:-}" ]] && cred="$c"
-        rm -f "$old_cfg"
     fi
 
-    write_tunnel_yml "$new_name" "$id" "$url" "$cred"
+    write_local_tunnel_files "$new_name" "$id" "$url" "$cred" || abort "本地配置/服务写入失败，已保留旧本地文件: $old_name"
 
     local old_svc_file new_svc_file
     old_svc_file="$(service_file "$old_name")"
     new_svc_file="$(service_file "$new_name")"
+    [[ -f "$old_cfg" ]] && rm -f "$old_cfg"
     [[ -f "$old_svc_file" ]] && run_root rm -f "$old_svc_file"
-    write_service_file "$new_name"
     run_root systemctl daemon-reload
 
     if [[ "$was_enabled" -eq 1 ]]; then
@@ -595,8 +704,7 @@ sync_cmd() {
             [[ -n "${u:-}" ]] && url="$u"
         fi
 
-        write_tunnel_yml "$name" "$id" "$url"
-        write_service_file "$name"
+        write_local_tunnel_files "$name" "$id" "$url" || abort "本地配置/服务写入失败: $name"
     done < "$tmp"
 
     rm -f "$tmp"
@@ -634,7 +742,7 @@ set_url_cmd() {
     cred="$(read_credentials_from_yml "$cfg")"
     [[ -n "${id:-}" ]] || abort "无法识别 tunnel 字段: $cfg"
     [[ -n "${cred:-}" ]] || cred="${CLOUDFLARED_HOME}/${id}.json"
-    write_tunnel_yml "$name" "$id" "$url" "$cred"
+    write_tunnel_yml "$name" "$id" "$url" "$cred" || abort "写入配置失败: $cfg"
 
     ui_print "已修改穿透地址: $name -> $url"
     echo "提示：如需立即生效，请执行 cf restart $name"
@@ -661,7 +769,7 @@ repair_cmd() {
     [[ -z "$cred" ]] && cred="${CLOUDFLARED_HOME}/${id}.json"
     [[ -z "$url" ]] && url="http://127.0.0.1:80"
 
-    write_tunnel_yml "$name" "$id" "$url" "$cred"
+    write_tunnel_yml "$name" "$id" "$url" "$cred" || abort "写入配置失败: $cfg"
 
     ui_print "已修复: $cfg"
 }
@@ -853,4 +961,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

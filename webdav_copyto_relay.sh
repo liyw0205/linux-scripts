@@ -88,10 +88,6 @@ read_pid_file() {
   echo "$pid"
 }
 
-current_worker_pid() {
-  echo "${BASHPID:-$$}"
-}
-
 remove_pid_file_if_matches() {
   local file="$1" expected="$2" actual=""
   actual="$(read_pid_file "$file" 2>/dev/null || true)"
@@ -575,6 +571,7 @@ run_job() {
   local total=0 success=0 skip=0 fail=0 overwrite=0
   local rel local_tmp downloaded_size
   local overwrite_this=0
+  local worker_pid="${BASHPID:-$$}"
 
   trap '
     stop_current_rclone
@@ -584,7 +581,7 @@ run_job() {
     LAST_MESSAGE="任务已停止"
     CURRENT_FILE=""
     save_stats
-    remove_pid_file_if_matches "'"$PID_FILE"'" "$(current_worker_pid)"
+    remove_pid_file_if_matches "'"$PID_FILE"'" "$worker_pid"
     rm -f "'"$RCLONE_PID_FILE"'" 2>/dev/null || true
     exit 1
   ' INT TERM
@@ -721,7 +718,7 @@ run_job() {
   OVERWRITE="$overwrite"
   save_stats
 
-  remove_pid_file_if_matches "$PID_FILE" "$(current_worker_pid)"
+  remove_pid_file_if_matches "$PID_FILE" "$worker_pid"
   rm -f "$RCLONE_PID_FILE" 2>/dev/null || true
 }
 
@@ -763,10 +760,18 @@ start_cmd() {
   prepare_file_list
 
   (
+    echo "${BASHPID:-$$}" > "$PID_FILE"
     run_job
   ) </dev/null >/dev/null 2>>"$LOG_FILE" &
-  echo $! > "$PID_FILE"
-  info "后台任务已启动，PID=$(cat "$PID_FILE")"
+  local started_pid="$!" visible_pid=""
+  for _ in {1..20}; do
+    visible_pid="$(read_pid_file "$PID_FILE" 2>/dev/null || true)"
+    [[ -n "$visible_pid" ]] && break
+    is_pid_alive "$started_pid" || break
+    sleep 0.1
+  done
+  [[ -z "$visible_pid" ]] && visible_pid="$started_pid"
+  info "后台任务已启动，PID=$visible_pid"
   info "日志文件: $LOG_FILE"
 }
 

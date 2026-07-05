@@ -75,6 +75,23 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+has_mikefarah_yq() {
+    command_exists yq || return 1
+    yq --version 2>/dev/null | grep -qiE 'mikefarah|https://github.com/mikefarah/yq'
+}
+
+has_python_yaml() {
+    command_exists python3 || return 1
+    python3 -c 'import yaml' >/dev/null 2>&1
+}
+
+yaml_value_is_integer() {
+    case "$1" in
+        port|socks-port) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -224,21 +241,42 @@ get_server_ip() {
 get_config_value() {
     local key="$1"
 
-    if [ -f "$CONFIG_FILE" ]; then
-        awk -v key="$key" '
-            index($0, key ":") == 1 {
-                value = substr($0, length(key) + 2)
-                sub(/^[[:space:]]*/, "", value)
-                sub(/[[:space:]]*#.*$/, "", value)
-                sub(/[[:space:]]*$/, "", value)
-                if ((value ~ /^".*"$/) || (value ~ /^'\''.*'\''$/)) {
-                    value = substr(value, 2, length(value) - 2)
-                }
-                print value
-                exit
-            }
-        ' "$CONFIG_FILE"
+    [ -f "$CONFIG_FILE" ] || return 0
+
+    if has_mikefarah_yq; then
+        YAML_KEY="$key" yq -r '.[strenv(YAML_KEY)] // ""' "$CONFIG_FILE" 2>/dev/null && return 0
     fi
+
+    if has_python_yaml; then
+        python3 - "$CONFIG_FILE" "$key" <<'PY' && return 0
+import sys
+import yaml
+
+cfg, key = sys.argv[1], sys.argv[2]
+with open(cfg, "r", encoding="utf-8") as fh:
+    data = yaml.safe_load(fh) or {}
+if not isinstance(data, dict):
+    sys.exit(1)
+value = data.get(key, "")
+if value is None:
+    value = ""
+print(value)
+PY
+    fi
+
+    awk -v key="$key" '
+        index($0, key ":") == 1 {
+            value = substr($0, length(key) + 2)
+            sub(/^[[:space:]]*/, "", value)
+            sub(/[[:space:]]*#.*$/, "", value)
+            sub(/[[:space:]]*$/, "", value)
+            if ((value ~ /^".*"$/) || (value ~ /^'\''.*'\''$/)) {
+                value = substr(value, 2, length(value) - 2)
+            }
+            print value
+            exit
+        }
+    ' "$CONFIG_FILE"
 }
 
 set_config_value() {
@@ -248,6 +286,32 @@ set_config_value() {
 
     mkdir -p "$(dirname "$CONFIG_FILE")"
     tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+
+    if has_mikefarah_yq; then
+        if [ -f "$CONFIG_FILE" ]; then
+            if ! cp "$CONFIG_FILE" "$tmp_file"; then
+                rm -f "$tmp_file"
+                tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+            fi
+        else
+            printf '{}\n' > "$tmp_file"
+        fi
+        if [ -s "$tmp_file" ]; then
+            local yq_expr
+            if yaml_value_is_integer "$key"; then
+                yq_expr='.[strenv(YAML_KEY)] = (strenv(YAML_VALUE) | tonumber)'
+            else
+                yq_expr='.[strenv(YAML_KEY)] = strenv(YAML_VALUE)'
+            fi
+            if YAML_KEY="$key" YAML_VALUE="$value" yq -i "$yq_expr" "$tmp_file" 2>/dev/null; then
+                mv "$tmp_file" "$CONFIG_FILE"
+                chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+                return 0
+            fi
+        fi
+        rm -f "$tmp_file"
+        tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+    fi
 
     if [ -f "$CONFIG_FILE" ]; then
         awk -v key="$key" -v value="$value" '
@@ -1551,4 +1615,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
