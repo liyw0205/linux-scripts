@@ -46,4 +46,11 @@ fi
 
 grep -qx "old-yml" "$CLOUDFLARED_HOME/demo.yml" || fail "yml was not rolled back"
 grep -qx "old-service" "$SERVICE_DIR/cf-tunnel-demo.service" || fail "service was not rolled back"
+
+rm -f "$CLOUDFLARED_HOME/fresh.yml" "$SERVICE_DIR/cf-tunnel-fresh.service"
+if write_local_tunnel_files fresh fresh-id http://127.0.0.1:7070 2>/dev/null; then
+  fail "fresh bundle write should fail when service writer fails"
+fi
+[[ ! -e "$CLOUDFLARED_HOME/fresh.yml" ]] || fail "new yml should be removed on rollback"
+[[ ! -e "$SERVICE_DIR/cf-tunnel-fresh.service" ]] || fail "new service should be removed on rollback"
 echo "ok - cf local bundle write rollback"

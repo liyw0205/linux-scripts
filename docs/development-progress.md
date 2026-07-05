@@ -450,15 +450,64 @@
 - `webdav_copyto_relay.sh config_remote` 最终 `rclone config update` 失败时无法证明真实 rclone 内部完全未改配置；当前脚本先用临时 remote 完成连接和路径验证，避免验证失败污染真实 remote，并避免 delete/create 破坏旧 remote。
 - 可继续审查其他脚本的安装/卸载路径，例如 `astr.sh install/patch`、`napcat.sh install`、`cf.sh install` 的下载和部署失败恢复。
 
-## 阶段 11 预期
+## 阶段 11：安装/下载失败恢复收敛
 
-继续做剩余脚本安装/卸载路径审查和文档收敛：
+日期：2026-07-05
+
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `astr.sh`、`napcat.sh` 和 `cf.sh` 安装/下载失败恢复审查。
+- `astr.sh`
+  - `install_astr` 新安装改为 staging clone + staging venv：先完成 git clone、venv 创建和依赖安装，全部成功后再发布最终 `APP_DIR` / `VENV_DIR`。
+  - `install_astr` 对已有完整安装不再原地重装；已有 repo 但缺失 venv 时只通过 staging 创建 venv。
+  - `install_astr` 对非空非完整目录拒绝覆盖，避免把残缺目录当成安装源继续污染环境。
+  - Python 依赖安装改为显式使用 `${VENV_DIR}/bin/python -m pip`，不再依赖裸 `pip`。
+  - `patch_astr` 要求工作区干净、远端更新为 fast-forward；移除普通 `git pull` merge fallback。
+  - `patch_astr` 先根据目标 commit 的 `requirements.txt` 构建新 venv，成功后再 fast-forward 代码并替换 venv；失败保留旧 HEAD 和旧 venv。
+  - 新增 `tests/astr_install_patch_regression.sh`，覆盖 clone 失败、pip 失败、已有 repo 缺失 venv、patch 依赖失败的恢复行为。
+- `napcat.sh`
+  - `install_napcat` 改为临时目录下载 installer，使用 `curl -fSL`、连接/总超时、非空校验和 `bash -n` 校验。
+  - installer 下载、校验或执行失败时不覆盖旧 `napcat-install.sh`，并清理临时目录。
+  - installer 执行成功后才发布到 `${BASE_DIR}/napcat-install.sh`。
+  - 新增 `tests/napcat_install_regression.sh`，覆盖 partial、空文件、语法错误 payload、installer 执行失败和成功发布。
+- `cf.sh`
+  - `http_get` 的 curl 路径增加 `-fSL`，避免 HTTP 错误页被当作有效下载。
+  - `download_with_proxies` 每次失败后删除输出文件，最终失败前兜底清理 partial。
+  - `install_cloudflared` 改为下载候选验证后，再写入目标目录 staging 文件并验证，最后 `mv` 发布；发布失败或最终验证失败时恢复旧二进制。
+  - 本地 yml/service bundle 回滚失败时保留备份文件并报错，避免恢复证据被提前删除。
+  - `tests/cf_local_writes_regression.sh` 增加原先不存在 yml/service 时失败回滚应删除新产物的覆盖。
+  - 新增 `tests/cf_install_download_regression.sh`，覆盖无效下载、发布阶段失败、成功发布和 `download_with_proxies` partial 清理。
+- README
+  - 同步 `cf.sh install`、`astr.sh install/patch`、`napcat.sh install/patch` 的失败恢复行为说明。
+- 测试工程化
+  - `scripts/test.sh` 接入新增 AstrBot、NapCat 和 cloudflared 回归测试。
+
+### 验证结果
+
+- `bash -n astr.sh napcat.sh cf.sh tests/astr_install_patch_regression.sh tests/napcat_install_regression.sh tests/cf_install_download_regression.sh scripts/test.sh` 通过。
+- `bash tests/astr_install_patch_regression.sh` 通过。
+- `bash tests/napcat_install_regression.sh` 通过。
+- `bash tests/cf_install_download_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 cloudflared 下载/安装、Cloudflare 远程操作、systemd 启停、AstrBot/NapCat 安装、screen/Xvfb/QQ 启动或外部服务部署。
+- `astr.sh patch` 仍会在 patch 成功发布 venv 后才切换到新环境；若运行中的进程已加载旧代码，需要用户按需重启服务。
+- `napcat.sh install` 仍执行上游 installer，本阶段只保证 installer 文件下载/发布不污染旧产物，不拦截上游 installer 内部副作用。
+
+## 阶段 12 预期
+
+继续做运行时一致性和测试覆盖收敛：
 
 - `astr.sh`
-  - 审查 `install_astr` / `patch_astr` 的 git、venv、pip 路径失败恢复与可测试性。
+  - 评估 `patch_astr` 与运行中 supervisor/app 的协调策略，必要时增加运行中提示或安全重启流程。
 - `napcat.sh`
-  - 审查 `install_napcat` 与下载 installer 的失败污染风险。
+  - 审查 `start_napcat` / `_run` 的 screen、Xvfb、QQ 子进程清理边界，补充无副作用 fake 进程测试。
 - `cf.sh`
-  - 复查 `install_cloudflared`、proxy 下载和 service 写入回滚是否还有可补回归。
+  - 复查 `rename` / `sync` 的远端成功、本地失败场景是否需要更明确的人工恢复提示。
 - 测试工具链
   - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。

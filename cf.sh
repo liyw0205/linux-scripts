@@ -164,7 +164,7 @@ http_get() {
     local out="$2"
 
     if need_cmd curl; then
-        curl -L --max-time 20 --connect-timeout 8 --retry 1 -o "$out" "$url" >/dev/null 2>&1
+        curl -fSL --max-time 20 --connect-timeout 8 --retry 1 -o "$out" "$url" >/dev/null 2>&1
     elif need_cmd wget; then
         wget -q --no-check-certificate -t 1 -T 12 -O "$out" "$url"
     else
@@ -176,7 +176,6 @@ http_get() {
 download_with_proxies() {
     local raw_url="$1"
     local out_file="$2"
-    local ok=1
 
     for p in $(sorted_proxies); do
         [ -z "$p" ] && continue
@@ -188,19 +187,20 @@ download_with_proxies() {
         ui_print "> 尝试代理: $p (延迟: ${l}ms)"
         rm -f "$out_file"
         if http_get "$full_url" "$out_file" && [[ -s "$out_file" ]]; then
-            ok=0
             ui_print "> 代理下载成功: $p"
             return 0
         fi
+        rm -f "$out_file"
     done
 
     ui_print "> 代理不可用或超时，回退直连..."
     rm -f "$out_file"
     if http_get "$raw_url" "$out_file" && [[ -s "$out_file" ]]; then
-        ok=0
+        return 0
     fi
 
-    [[ $ok -eq 0 ]]
+    rm -f "$out_file"
+    return 1
 }
 
 # ================== cloudflared 安装 ==================
@@ -213,27 +213,85 @@ ensure_cloudflared() {
 
 install_cloudflared() {
     ui_print "未检测到 cloudflared，开始安装..."
-    local asset url tmp
+    local asset url tmp target_dir target_base stage="" backup="" target_touched=0
     asset="$(detect_cloudflared_asset)"
     url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"
-    tmp="$(mktemp "${TMP_ROOT%/}/${asset}.XXXXXX")"
+    tmp="$(mktemp "${TMP_ROOT%/}/${asset}.XXXXXX")" || abort "无法创建临时下载文件"
+
+    restore_cloudflared_target() {
+        [[ "$target_touched" -eq 1 ]] || return 0
+        if [[ -n "$backup" ]]; then
+            run_root cp -p "$backup" "$CLOUDFLARED_BIN" 2>/dev/null || true
+        else
+            run_root rm -f "$CLOUDFLARED_BIN" 2>/dev/null || true
+        fi
+    }
+
+    cleanup_cloudflared_install() {
+        rm -f "$tmp"
+        [[ -n "$stage" ]] && run_root rm -f "$stage" 2>/dev/null || true
+        [[ -n "$backup" ]] && run_root rm -f "$backup" 2>/dev/null || true
+    }
 
     if ! download_with_proxies "$url" "$tmp"; then
-        rm -f "$tmp"
+        cleanup_cloudflared_install
         abort "下载 cloudflared 失败，请检查网络"
     fi
 
-    chmod +x "$tmp"
+    if ! chmod +x "$tmp"; then
+        cleanup_cloudflared_install
+        abort "下载的 cloudflared 无法设置执行权限"
+    fi
     if ! "$tmp" --version >/dev/null 2>&1; then
-        rm -f "$tmp"
+        cleanup_cloudflared_install
         abort "下载的 cloudflared 无法运行，请检查架构或文件完整性"
     fi
 
-    run_root mkdir -p "$(dirname "$CLOUDFLARED_BIN")"
-    run_root install -m 0755 "$tmp" "$CLOUDFLARED_BIN"
-    rm -f "$tmp"
+    target_dir="$(dirname "$CLOUDFLARED_BIN")"
+    target_base="$(basename "$CLOUDFLARED_BIN")"
+    if ! run_root mkdir -p "$target_dir"; then
+        cleanup_cloudflared_install
+        abort "无法创建 cloudflared 目标目录: $target_dir"
+    fi
+    if run_root test -f "$CLOUDFLARED_BIN"; then
+        backup="$(mktemp "${TMP_ROOT%/}/cloudflared.backup.XXXXXX")" || {
+            cleanup_cloudflared_install
+            abort "无法创建 cloudflared 备份文件"
+        }
+        if ! run_root cp -p "$CLOUDFLARED_BIN" "$backup"; then
+            cleanup_cloudflared_install
+            abort "备份旧 cloudflared 失败"
+        fi
+    fi
 
-    "$CLOUDFLARED_BIN" --version >/dev/null || abort "安装验证失败"
+    stage="$(run_root mktemp "${target_dir}/.${target_base}.XXXXXX")" || {
+        cleanup_cloudflared_install
+        abort "无法创建 cloudflared 发布临时文件"
+    }
+    target_touched=1
+    if ! run_root install -m 0755 "$tmp" "$stage"; then
+        restore_cloudflared_target
+        cleanup_cloudflared_install
+        abort "写入 cloudflared 发布临时文件失败"
+    fi
+    if ! "$stage" --version >/dev/null 2>&1; then
+        restore_cloudflared_target
+        cleanup_cloudflared_install
+        abort "发布临时 cloudflared 验证失败"
+    fi
+    if ! run_root mv -f "$stage" "$CLOUDFLARED_BIN"; then
+        restore_cloudflared_target
+        cleanup_cloudflared_install
+        abort "发布 cloudflared 失败"
+    fi
+    stage=""
+
+    if ! "$CLOUDFLARED_BIN" --version >/dev/null; then
+        restore_cloudflared_target
+        cleanup_cloudflared_install
+        abort "安装验证失败"
+    fi
+    cleanup_cloudflared_install
     ui_print "cloudflared 安装完成: $($CLOUDFLARED_BIN --version | head -n 1)"
 }
 
@@ -502,10 +560,15 @@ write_local_tunnel_files() {
     fi
 
     error "本地配置/服务写入失败，开始回滚: $name"
-    restore_user_file "$cfg" "$cfg_backup" || true
-    restore_root_file "$svc_file" "$svc_backup" || true
-    cleanup_user_backup "$cfg_backup"
-    cleanup_root_backup "$svc_backup"
+    local restore_failed=0
+    restore_user_file "$cfg" "$cfg_backup" || restore_failed=1
+    restore_root_file "$svc_file" "$svc_backup" || restore_failed=1
+    if [[ "$restore_failed" -eq 0 ]]; then
+        cleanup_user_backup "$cfg_backup"
+        cleanup_root_backup "$svc_backup"
+    else
+        error "回滚不完整，保留备份以便人工恢复: ${cfg_backup:-<none>} ${svc_backup:-<none>}"
+    fi
     return 1
 }
 

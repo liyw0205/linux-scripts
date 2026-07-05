@@ -228,6 +228,11 @@ cf create myweb http://127.0.0.1:8080
 cf enable myweb
 ```
 
+说明：
+
+- `install` 会先下载并验证候选 `cloudflared`，再通过目标目录临时文件发布；发布失败会保留旧二进制。
+- 隧道 yml 和 systemd service 采用成组写入，失败时回滚旧文件。
+
 ## mihomo.sh
 
 Mihomo Linux 一体化管理脚本。支持核心安装、systemd 服务、订阅导入、自动代理组、前端切换、端口修改、SOCKS5 多端口组和 `Country.mmdb` 修复。
@@ -343,6 +348,11 @@ bash astr.sh install
 bash astr.sh start
 ```
 
+说明：
+
+- 新安装会先在临时目录完成 git clone、venv 创建和依赖安装，全部成功后再发布到最终目录。
+- `patch` 只接受干净工作区和 fast-forward 更新，并先构建新 venv；依赖安装失败时保留旧代码和旧 venv。
+
 ## napcat.sh
 
 NapCat 单文件管理脚本，支持下载安装 NapCat、下载并编译 Linux 启动器补丁、设置启动 QQ 号、使用 `screen` 守护运行、异常退出自动重启、日志截断和状态查看。
@@ -377,6 +387,11 @@ napcat -q 3834455831
 napcat -q 3834455831 start
 napcat -q
 ```
+
+说明：
+
+- `install` 会把 installer 下载到临时目录，非空和 `bash -n` 校验通过后执行；执行成功后才发布到 `napcat-install.sh`。
+- `patch` 会临时下载和编译 launcher，下载、编译或 chmod 失败时保留旧 `.so`。
 
 ## 常见组合
 

@@ -91,14 +91,19 @@ log_event() {
 }
 
 
+install_requirements() {
+    local venv_dir="$1"
+    local requirements_file="$2"
+    local python_bin="${venv_dir}/bin/python"
+
+    [[ -x "${python_bin}" ]] || return 1
+    "${python_bin}" -m pip install -U pip
+    "${python_bin}" -m pip install -r "${requirements_file}"
+}
+
 install_astr() {
     local repo_url="${ASTR_REPO_URL:-https://github.com/AstrBotDevs/AstrBot.git}"
-    local base_dir
-    base_dir="$(dirname "${APP_DIR}")"
-    local venv_parent
-    venv_parent="$(dirname "${VENV_DIR}")"
-    local venv_name
-    venv_name="$(basename "${VENV_DIR}")"
+    local base_dir app_name venv_parent venv_name tmp_app tmp_venv
 
     echo "开始安装 AstrBot..."
 
@@ -112,51 +117,180 @@ install_astr() {
         return 1
     fi
 
-    if [[ ! -x "${VENV_DIR}/bin/python" ]]; then
-        echo "创建虚拟环境: ${VENV_DIR}"
-        python3 -m venv "${VENV_DIR}"
-    fi
+    venv_parent="$(dirname "${VENV_DIR}")"
+    venv_name="$(basename "${VENV_DIR}")"
 
-    if [[ ! -d "${APP_DIR}/.git" ]]; then
-        if [[ -d "${APP_DIR}" && -n "$(ls -A "${APP_DIR}" 2>/dev/null || true)" ]]; then
-            echo "目录已存在且非空: ${APP_DIR}，跳过 git clone" >&2
-        else
-            mkdir -p "${base_dir}"
-            git clone "${repo_url}" "${APP_DIR}"
+    if [[ -d "${APP_DIR}/.git" ]]; then
+        if [[ -x "${VENV_DIR}/bin/python" && -x "${VENV_DIR}/bin/pip" ]]; then
+            echo "检测到已有 AstrBot 安装: ${APP_DIR}"
+            echo "如需更新请执行: astr patch"
+            return 0
         fi
-    else
-        echo "仓库已存在: ${APP_DIR}"
+        if [[ ! -f "${APP_DIR}/requirements.txt" ]]; then
+            echo "未找到 ${APP_DIR}/requirements.txt" >&2
+            return 1
+        fi
+        if [[ -e "${VENV_DIR}" && ! -d "${VENV_DIR}" ]]; then
+            echo "虚拟环境路径已存在且不是目录: ${VENV_DIR}" >&2
+            return 1
+        fi
+        if [[ -d "${VENV_DIR}" && -n "$(ls -A "${VENV_DIR}" 2>/dev/null || true)" ]]; then
+            echo "虚拟环境目录已存在但不可用，拒绝覆盖: ${VENV_DIR}" >&2
+            return 1
+        fi
+        mkdir -p "${venv_parent}"
+        tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || return 1
+        if ! python3 -m venv "${tmp_venv}" || ! install_requirements "${tmp_venv}" "${APP_DIR}/requirements.txt"; then
+            rm -rf "${tmp_venv}"
+            return 1
+        fi
+        rmdir "${VENV_DIR}" 2>/dev/null || true
+        if ! mv "${tmp_venv}" "${VENV_DIR}"; then
+            rm -rf "${tmp_venv}"
+            return 1
+        fi
+        echo "AstrBot 安装完成"
+        echo "启动: astr start"
+        return 0
     fi
 
-    if [[ ! -f "${APP_DIR}/requirements.txt" ]]; then
-        echo "未找到 ${APP_DIR}/requirements.txt" >&2
+    if [[ -e "${APP_DIR}" && ! -d "${APP_DIR}" ]]; then
+        echo "应用路径已存在且不是目录: ${APP_DIR}" >&2
+        return 1
+    fi
+    if [[ -d "${APP_DIR}" && -n "$(ls -A "${APP_DIR}" 2>/dev/null || true)" ]]; then
+        echo "应用目录已存在但不是完整安装，拒绝覆盖: ${APP_DIR}" >&2
+        return 1
+    fi
+    if [[ -e "${VENV_DIR}" && ! -d "${VENV_DIR}" ]]; then
+        echo "虚拟环境路径已存在且不是目录: ${VENV_DIR}" >&2
+        return 1
+    fi
+    if [[ -d "${VENV_DIR}" && -n "$(ls -A "${VENV_DIR}" 2>/dev/null || true)" ]]; then
+        echo "虚拟环境目录已存在但不是完整安装，拒绝覆盖: ${VENV_DIR}" >&2
         return 1
     fi
 
-    # shellcheck disable=SC1091
-    source "${VENV_DIR}/bin/activate"
-    pip install -U pip
-    pip install -r "${APP_DIR}/requirements.txt"
+    base_dir="$(dirname "${APP_DIR}")"
+    app_name="$(basename "${APP_DIR}")"
+    mkdir -p "${base_dir}" "${venv_parent}"
+    tmp_app="$(mktemp -d "${base_dir}/.${app_name}.clone.XXXXXX")" || return 1
+    tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || {
+        rm -rf "${tmp_app}"
+        return 1
+    }
+
+    if ! git clone "${repo_url}" "${tmp_app}"; then
+        rm -rf "${tmp_app}" "${tmp_venv}"
+        return 1
+    fi
+    if [[ ! -f "${tmp_app}/requirements.txt" ]]; then
+        echo "未找到 ${tmp_app}/requirements.txt" >&2
+        rm -rf "${tmp_app}" "${tmp_venv}"
+        return 1
+    fi
+    if ! python3 -m venv "${tmp_venv}" || ! install_requirements "${tmp_venv}" "${tmp_app}/requirements.txt"; then
+        rm -rf "${tmp_app}" "${tmp_venv}"
+        return 1
+    fi
+
+    rmdir "${APP_DIR}" 2>/dev/null || true
+    rmdir "${VENV_DIR}" 2>/dev/null || true
+    if ! mv "${tmp_app}" "${APP_DIR}"; then
+        rm -rf "${tmp_app}" "${tmp_venv}"
+        return 1
+    fi
+    if ! mv "${tmp_venv}" "${VENV_DIR}"; then
+        rm -rf "${APP_DIR}" "${tmp_venv}"
+        return 1
+    fi
+
     echo "AstrBot 安装完成"
     echo "启动: astr start"
 }
 
 patch_astr() {
+    local old_head upstream new_head tmp_requirements tmp_venv venv_parent venv_name backup_venv=""
+
     if [[ ! -d "${APP_DIR}/.git" ]]; then
         echo "未找到 Git 仓库: ${APP_DIR}，请先执行 astr install" >&2
         return 1
     fi
-    if [[ ! -x "${VENV_DIR}/bin/pip" ]]; then
+    if [[ ! -x "${VENV_DIR}/bin/python" || ! -x "${VENV_DIR}/bin/pip" ]]; then
         echo "未找到虚拟环境: ${VENV_DIR}，请先执行 astr install" >&2
         return 1
     fi
 
     echo "更新 AstrBot 代码与依赖..."
-    git -C "${APP_DIR}" pull --ff-only || git -C "${APP_DIR}" pull
-    # shellcheck disable=SC1091
-    source "${VENV_DIR}/bin/activate"
-    pip install -U pip
-    pip install -r "${APP_DIR}/requirements.txt"
+    if ! git -C "${APP_DIR}" diff --quiet || ! git -C "${APP_DIR}" diff --cached --quiet; then
+        echo "工作区存在未提交修改，拒绝自动更新: ${APP_DIR}" >&2
+        return 1
+    fi
+
+    if ! old_head="$(git -C "${APP_DIR}" rev-parse HEAD)"; then
+        return 1
+    fi
+    if ! git -C "${APP_DIR}" fetch --prune; then
+        return 1
+    fi
+    if ! upstream="$(git -C "${APP_DIR}" rev-parse --abbrev-ref --symbolic-full-name '@{u}')"; then
+        echo "当前分支未设置 upstream，无法安全 patch" >&2
+        return 1
+    fi
+    if ! new_head="$(git -C "${APP_DIR}" rev-parse "${upstream}")"; then
+        return 1
+    fi
+    if ! git -C "${APP_DIR}" merge-base --is-ancestor "${old_head}" "${new_head}"; then
+        echo "远端更新不是当前 HEAD 的 fast-forward，拒绝 patch" >&2
+        return 1
+    fi
+
+    venv_parent="$(dirname "${VENV_DIR}")"
+    venv_name="$(basename "${VENV_DIR}")"
+    mkdir -p "${venv_parent}"
+    tmp_requirements="$(mktemp "${venv_parent}/.${venv_name}.requirements.XXXXXX")" || return 1
+    tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || {
+        rm -f "${tmp_requirements}"
+        return 1
+    }
+
+    if ! git -C "${APP_DIR}" show "${new_head}:requirements.txt" > "${tmp_requirements}" ||
+        ! python3 -m venv "${tmp_venv}" ||
+        ! install_requirements "${tmp_venv}" "${tmp_requirements}"; then
+        rm -rf "${tmp_venv}"
+        rm -f "${tmp_requirements}"
+        return 1
+    fi
+    rm -f "${tmp_requirements}"
+
+    if ! git -C "${APP_DIR}" merge --ff-only "${new_head}"; then
+        rm -rf "${tmp_venv}"
+        git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    if [[ -e "${VENV_DIR}" ]]; then
+        backup_venv="$(mktemp -d "${venv_parent}/.${venv_name}.backup.XXXXXX")" || {
+            rm -rf "${tmp_venv}"
+            git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
+            return 1
+        }
+        rmdir "${backup_venv}"
+        if ! mv "${VENV_DIR}" "${backup_venv}"; then
+            rm -rf "${tmp_venv}" "${backup_venv}"
+            git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
+    if ! mv "${tmp_venv}" "${VENV_DIR}"; then
+        rm -rf "${tmp_venv}"
+        if [[ -n "${backup_venv}" ]]; then
+            mv "${backup_venv}" "${VENV_DIR}" 2>/dev/null || true
+        fi
+        git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
+        return 1
+    fi
+    [[ -n "${backup_venv}" ]] && rm -rf "${backup_venv}"
     echo "AstrBot patch 完成"
 }
 

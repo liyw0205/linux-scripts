@@ -408,11 +408,32 @@ deploy_napcat() {
 
 install_napcat() {
   local install_script="${BASE_DIR}/napcat-install.sh"
+  local installer_url="https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh"
+  local tmp_dir tmp_script
 
+  mkdir -p "${BASE_DIR}"
   cd "${BASE_DIR}"
   echo "开始安装 NapCat..."
-  curl -o "${install_script}" https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh
-  bash "${install_script}"
+  tmp_dir="$(mktemp -d "${BASE_DIR}/.napcat-install.XXXXXX")" || return 1
+  tmp_script="${tmp_dir}/install.sh"
+
+  if ! curl -k -fSL --connect-timeout 10 --max-time 30 -o "${tmp_script}" "${installer_url}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if [[ ! -s "${tmp_script}" ]] || ! bash -n "${tmp_script}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if ! bash "${tmp_script}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if ! mv -f "${tmp_script}" "${install_script}"; then
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  rm -rf "${tmp_dir}"
 }
 
 require_install() {
