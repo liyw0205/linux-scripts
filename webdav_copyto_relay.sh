@@ -179,6 +179,9 @@ write_state_kv() {
 }
 
 save_config() {
+  local tmp_file
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.relay.conf.XXXXXX")"
   {
     write_config_kv WEBDAV_URL "$WEBDAV_URL"
     write_config_kv WEBDAV_USER "$WEBDAV_USER"
@@ -197,7 +200,8 @@ save_config() {
     write_config_kv RCLONE_LOW_LEVEL_RETRIES "$RCLONE_LOW_LEVEL_RETRIES"
     write_config_kv RCLONE_TIMEOUT "$RCLONE_TIMEOUT"
     write_config_kv RCLONE_CONTIMEOUT "$RCLONE_CONTIMEOUT"
-  } > "$CONFIG_FILE"
+  } > "$tmp_file"
+  mv "$tmp_file" "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
@@ -228,8 +232,7 @@ config_interactive() {
   TMP_DIR="$(ask_default "本地临时目录" "${TMP_DIR:-$TMP_DIR_DEFAULT}")"
   MIN_FREE_PERCENT="$(ask_default "最低剩余空间百分比" "${MIN_FREE_PERCENT:-$MIN_FREE_PERCENT_DEFAULT}")"
 
-  save_config
-  info "配置已保存: $CONFIG_FILE"
+  info "配置已读取，验证通过后写入: $CONFIG_FILE"
 }
 
 ########################################
@@ -347,22 +350,57 @@ install_deps() {
 }
 
 config_remote() {
+  local pass_obscured tmp_conf tmp_remote
   info "配置 rclone remote: $REMOTE_NAME"
 
-  rclone config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
-  rclone config create "$REMOTE_NAME" webdav \
+  pass_obscured="$(rclone obscure "$WEBDAV_PASS")" || return 1
+  tmp_conf="$(mktemp "${TMPDIR:-/tmp}/webdav-relay-rclone.XXXXXX")" || return 1
+  tmp_remote="${REMOTE_NAME}_probe_$$"
+
+  if ! rclone --config "$tmp_conf" config create "$tmp_remote" webdav \
     url="$WEBDAV_URL" \
     vendor="other" \
     user="$WEBDAV_USER" \
-    pass="$(rclone obscure "$WEBDAV_PASS")" >/dev/null
+    pass="$pass_obscured" >/dev/null; then
+    rm -f "$tmp_conf"
+    return 1
+  fi
 
-  rclone lsd "${REMOTE_NAME}:" >/dev/null 2>&1 || die "WebDAV 连接失败，请检查 URL/用户名/密码"
+  if ! rclone --config "$tmp_conf" lsd "${tmp_remote}:" >/dev/null 2>&1; then
+    rm -f "$tmp_conf"
+    err "WebDAV 连接失败，请检查 URL/用户名/密码"
+    return 1
+  fi
+
+  if ! ensure_remote_paths_exist_for "$tmp_remote" --config "$tmp_conf"; then
+    rm -f "$tmp_conf"
+    return 1
+  fi
+  rm -f "$tmp_conf"
+
+  if rclone listremotes 2>/dev/null | grep -qx "${REMOTE_NAME}:"; then
+    rclone config update "$REMOTE_NAME" \
+      url="$WEBDAV_URL" \
+      vendor="other" \
+      user="$WEBDAV_USER" \
+      pass="$pass_obscured" >/dev/null || return 1
+  else
+    rclone config create "$REMOTE_NAME" webdav \
+      url="$WEBDAV_URL" \
+      vendor="other" \
+      user="$WEBDAV_USER" \
+      pass="$pass_obscured" >/dev/null || return 1
+  fi
+
   info "WebDAV 连接测试通过"
 }
 
 ensure_remote_available() {
   rclone lsd "${REMOTE_NAME}:" >/dev/null 2>&1 \
-    || die "rclone remote 不可用: ${REMOTE_NAME}:，请先执行 install 或 reconfig"
+    || {
+      err "rclone remote 不可用: ${REMOTE_NAME}:，请先执行 install 或 reconfig"
+      return 1
+    }
 }
 
 rclone_base_args() {
@@ -382,20 +420,33 @@ rclone_base_args() {
 
 remote_dir_exists() {
   local remote_dir="$1"
-  rclone lsf "$remote_dir" >/dev/null 2>&1
+  shift || true
+  rclone "$@" lsf "$remote_dir" >/dev/null 2>&1
+}
+
+ensure_remote_paths_exist_for() {
+  local remote_name="$1"
+  shift || true
+  local src_remote="${remote_name}:${SRC_PATH}"
+  local dst_remote="${remote_name}:${DST_PATH}"
+
+  info "检查源路径是否存在: $src_remote"
+  remote_dir_exists "$src_remote" "$@" || {
+    err "云端下载路径不存在: $src_remote"
+    return 1
+  }
+
+  info "检查目标路径是否存在: $dst_remote"
+  remote_dir_exists "$dst_remote" "$@" || {
+    err "云端上传路径不存在: $dst_remote"
+    return 1
+  }
+
+  info "源路径和目标路径检查通过"
 }
 
 ensure_remote_paths_exist() {
-  local src_remote="${REMOTE_NAME}:${SRC_PATH}"
-  local dst_remote="${REMOTE_NAME}:${DST_PATH}"
-
-  info "检查源路径是否存在: $src_remote"
-  remote_dir_exists "$src_remote" || die "云端下载路径不存在: $src_remote"
-
-  info "检查目标路径是否存在: $dst_remote"
-  remote_dir_exists "$dst_remote" || die "云端上传路径不存在: $dst_remote"
-
-  info "源路径和目标路径检查通过"
+  ensure_remote_paths_exist_for "$REMOTE_NAME"
 }
 
 ########################################
@@ -737,9 +788,9 @@ install_cmd() {
   install_deps
   init_stats
   config_interactive
-  load_config
   config_remote
-  ensure_remote_paths_exist
+  save_config
+  info "配置已保存: $CONFIG_FILE"
   info "安装完成"
   info "接下来可执行：start / stop / restart / status / reconfig / uninstall"
 }
@@ -891,13 +942,37 @@ status_cmd() {
 }
 
 reconfig_cmd() {
+  local backup_file="" had_config=0
   ensure_state_dir
   load_config
   install_deps
-  config_interactive
-  load_config
-  config_remote
-  ensure_remote_paths_exist
+
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  backup_file="$(mktemp "${CONFIG_FILE}.bak.XXXXXX")"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    cp -p "$CONFIG_FILE" "$backup_file"
+    had_config=1
+  fi
+
+  restore_config() {
+    if [[ "$had_config" -eq 1 ]]; then
+      mv -f "$backup_file" "$CONFIG_FILE"
+    else
+      rm -f "$CONFIG_FILE" "$backup_file"
+    fi
+  }
+
+  if ! config_interactive; then
+    restore_config
+    return 1
+  fi
+  if ! config_remote; then
+    restore_config
+    return 1
+  fi
+  save_config
+  rm -f "$backup_file"
+  info "配置已保存: $CONFIG_FILE"
   info "重配置完成"
 }
 

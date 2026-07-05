@@ -179,7 +179,7 @@ bash webdav_copyto_relay.sh uninstall
 说明：
 
 - 脚本只删除本地临时文件，不会删除远端源文件。
-- `install` 和 `reconfig` 会按配置重建同名 rclone remote，建议使用默认的专用 remote 名称，避免覆盖已有重要 remote。
+- `install` 和 `reconfig` 会先用临时 remote 验证连接和源/目标路径，再创建或更新同名 rclone remote，建议使用默认的专用 remote 名称。
 - `start` 只做 remote 可用性和路径存在性检查，不会重建 rclone remote。
 
 ## cf.sh

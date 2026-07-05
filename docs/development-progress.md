@@ -404,15 +404,61 @@
 - `webdav_copyto_relay.sh reconfig` 仍先保存本地配置再重建 remote，失败恢复策略可继续完善。
 - `mihomo.sh download_country_mmdb` / `repair_mmdb` 仍会先删除旧 mmdb 再下载，后续可复用本阶段的下载原子化思路继续修复。
 
-## 阶段 10 预期
+## 阶段 10：配置写入和 mmdb 下载失败恢复
 
-继续收敛剩余配置写入和资源下载失败路径：
+日期：2026-07-05
 
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `webdav_copyto_relay.sh` 配置写入恢复、`mihomo.sh` mmdb 下载保护审查和提交前只读复核。
 - `webdav_copyto_relay.sh`
-  - 改造 `config_remote`，避免错误凭据或连接失败时破坏旧同名 rclone remote。
-  - 为 `reconfig` 增加失败恢复测试，避免本地配置和 rclone remote 出现半更新状态。
+  - `save_config` 改为同目录临时文件写入后 `mv`，避免直接截断 `CONFIG_FILE`。
+  - `config_interactive` 改为只收集变量，不立即保存配置。
+  - `config_remote` 改为先使用临时 rclone config 创建 probe remote，并在 probe remote 上完成 `lsd` 和源/目标路径验证，验证失败不触碰真实同名 remote。
+  - 真实 remote 提交阶段改为存在则 `rclone config update`，不存在才 `config create`，不再先 `config delete`。
+  - `reconfig_cmd` 在 remote 连接与远端路径验证成功、真实 remote 提交成功后才保存新配置；失败时恢复旧配置或删除新配置。
+  - `ensure_remote_available` / `ensure_remote_paths_exist` 改为返回失败，便于上层恢复配置。
+  - fake `rclone` fixture 支持 `--config` probe、`config update/create/delete/listremotes` 和失败模式。
+  - Bats 包装同步覆盖所有 Bash fallback 子用例，避免有 `bats` 时漏跑新场景。
+  - 提交前复核发现路径验证失败仍可能污染真实 remote，已将源/目标路径验证前移到临时 probe remote。
+  - 回归测试新增：
+    - probe 失败时不触碰真实 remote，且恢复旧配置。
+    - probe 路径检查失败时不触碰真实 remote，且恢复旧配置。
+    - reconfig 成功时更新配置并 update 已有 remote。
+    - 最终 remote update 失败时恢复旧配置且不 delete 旧 remote。
 - `mihomo.sh`
-  - 收敛 `download_country_mmdb` / `repair_mmdb` 的 delete-before-download 行为，下载失败时保留旧 mmdb。
-  - 可补成功路径回归，验证核心/前端 staging 成功后最终文件和 metadata 正确发布。
+  - `check_country_mmdb` 支持传入候选文件路径。
+  - `download_country_mmdb` 支持 `--force`；下载到候选文件，校验有效后才发布到 `Country.mmdb`。
+  - `download_country_mmdb` 失败或下载无效 payload 时保留旧 `Country.mmdb`、`country.mmdb` 和 `geoip.metadb`。
+  - `repair_mmdb` 不再先删除旧 mmdb，改为 force 下载成功后再测试/重启。
+  - 前端 staging 增加 `prepare_frontend_stage`，支持压缩包带单层目录并确保最终 `UI_DIR/index.html` 存在。
+  - `tests/mihomo_install_atomic_regression.sh` 增加核心成功、MetaCubeXD/Zashboard 成功、mmdb 下载失败、无效 payload 和成功发布测试。
+- README
+  - 同步 `webdav_copyto_relay.sh install/reconfig` 新行为：先验证配置，再创建或更新同名 rclone remote。
+
+### 验证结果
+
+- `bash tests/webdav_copyto_relay_regression.sh all` 通过。
+- `bash tests/mihomo_install_atomic_regression.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 rclone 配置/传输、WebDAV 访问、Mihomo 下载/重启、systemd 启停或外部服务部署。
+- `webdav_copyto_relay.sh config_remote` 最终 `rclone config update` 失败时无法证明真实 rclone 内部完全未改配置；当前脚本先用临时 remote 完成连接和路径验证，避免验证失败污染真实 remote，并避免 delete/create 破坏旧 remote。
+- 可继续审查其他脚本的安装/卸载路径，例如 `astr.sh install/patch`、`napcat.sh install`、`cf.sh install` 的下载和部署失败恢复。
+
+## 阶段 11 预期
+
+继续做剩余脚本安装/卸载路径审查和文档收敛：
+
+- `astr.sh`
+  - 审查 `install_astr` / `patch_astr` 的 git、venv、pip 路径失败恢复与可测试性。
+- `napcat.sh`
+  - 审查 `install_napcat` 与下载 installer 的失败污染风险。
+- `cf.sh`
+  - 复查 `install_cloudflared`、proxy 下载和 service 写入回滚是否还有可补回归。
 - 测试工具链
   - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。

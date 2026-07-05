@@ -493,12 +493,13 @@ ensure_config_exists() {
 # =========================
 
 check_country_mmdb() {
-    if [ ! -f "$COUNTRY_MMDB" ]; then return 1; fi
+    local mmdb="${1:-$COUNTRY_MMDB}"
+    if [ ! -f "$mmdb" ]; then return 1; fi
     local size
-    size="$(stat -c%s "$COUNTRY_MMDB" 2>/dev/null || echo 0)"
+    size="$(stat -c%s "$mmdb" 2>/dev/null || echo 0)"
     [ "$size" -ge 100000 ] || return 1
     local type
-    type="$(file "$COUNTRY_MMDB" 2>/dev/null || echo unknown)"
+    type="$(file "$mmdb" 2>/dev/null || echo unknown)"
     echo "$type" | grep -qiE "HTML|XML|text|empty" && return 1
     return 0
 }
@@ -506,8 +507,13 @@ check_country_mmdb() {
 download_country_mmdb() {
     check_root
     mkdir -p "$MIHOMO_DIR"
+    local force=0 candidate
 
-    if check_country_mmdb; then
+    if [ "${1:-}" = "--force" ]; then
+        force=1
+    fi
+
+    if [ "$force" -eq 0 ] && check_country_mmdb; then
         local size
         size="$(stat -c%s "$COUNTRY_MMDB" 2>/dev/null || echo 0)"
         log_success "Country.mmdb 正常：$COUNTRY_MMDB (${size} bytes)"
@@ -516,11 +522,16 @@ download_country_mmdb() {
 
     log_warn "Country.mmdb 不存在或无效，开始下载..."
 
-    rm -f "$COUNTRY_MMDB" "$MIHOMO_DIR/country.mmdb" "$MIHOMO_DIR/geoip.metadb"
+    candidate="$(mktemp "$MIHOMO_DIR/.Country.mmdb.XXXXXX")" || return 1
 
-    if download_file "$COUNTRY_MMDB_URL" "$COUNTRY_MMDB" "Country.mmdb"; then
-        chmod 644 "$COUNTRY_MMDB"
-        if check_country_mmdb; then
+    if download_file "$COUNTRY_MMDB_URL" "$candidate" "Country.mmdb"; then
+        if check_country_mmdb "$candidate"; then
+            chmod 644 "$candidate"
+            mv -f "$candidate" "$COUNTRY_MMDB" || {
+                rm -f "$candidate"
+                return 1
+            }
+            rm -f "$MIHOMO_DIR/country.mmdb" "$MIHOMO_DIR/geoip.metadb"
             local size
             size="$(stat -c%s "$COUNTRY_MMDB" 2>/dev/null || echo 0)"
             log_success "Country.mmdb 下载完成：$COUNTRY_MMDB (${size} bytes)"
@@ -528,6 +539,7 @@ download_country_mmdb() {
         fi
     fi
 
+    rm -f "$candidate"
     log_error "Country.mmdb 下载失败或文件无效"
     return 1
 }
@@ -535,8 +547,7 @@ download_country_mmdb() {
 repair_mmdb() {
     check_root
     log_info "开始修复 Country.mmdb..."
-    rm -f "$COUNTRY_MMDB" "$MIHOMO_DIR/country.mmdb" "$MIHOMO_DIR/geoip.metadb"
-    download_country_mmdb
+    download_country_mmdb --force || return 1
     test_and_restart
     log_success "Country.mmdb 修复完成"
 }
@@ -1026,6 +1037,26 @@ replace_dir_with_backup() {
     return 1
 }
 
+prepare_frontend_stage() {
+    local stage_dir="$1"
+    local nested_index nested_dir item
+
+    if [ -f "$stage_dir/index.html" ]; then
+        return 0
+    fi
+
+    nested_index="$(find "$stage_dir" -mindepth 2 -maxdepth 2 -type f -name 'index.html' | head -n 1)"
+    [ -n "$nested_index" ] || return 1
+    nested_dir="$(dirname "$nested_index")"
+
+    while IFS= read -r item; do
+        mv "$item" "$stage_dir/"
+    done < <(find "$nested_dir" -mindepth 1 -maxdepth 1)
+    rmdir "$nested_dir" 2>/dev/null || true
+
+    [ -f "$stage_dir/index.html" ]
+}
+
 create_systemd_service() {
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -1069,7 +1100,7 @@ install_metacubexd() {
         rm -rf "$tmp_dir"
         return 1
     }
-    if ! find "$stage_dir" -type f -name 'index.html' -print -quit | grep -q .; then
+    if ! prepare_frontend_stage "$stage_dir"; then
         rm -rf "$tmp_dir"
         return 1
     fi
@@ -1103,7 +1134,7 @@ install_zashboard() {
         rm -rf "$tmp_dir"
         return 1
     }
-    if ! find "$stage_dir" -type f -name 'index.html' -print -quit | grep -q .; then
+    if ! prepare_frontend_stage "$stage_dir"; then
         rm -rf "$tmp_dir"
         return 1
     fi

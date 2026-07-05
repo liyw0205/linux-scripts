@@ -58,13 +58,18 @@ wait_pid_gone() {
 
 write_config() {
   local tmp="$1"
+  local url="${2:-http://127.0.0.1:5241/dav}"
+  local user="${3:-user}"
+  local pass="${4:-pass}"
+  local src="${5:-src}"
+  local dst="${6:-dst}"
   cat > "$tmp/relay.conf" <<EOF
-WEBDAV_URL='http://127.0.0.1:5241/dav'
-WEBDAV_USER='user'
-WEBDAV_PASS='pass'
+WEBDAV_URL='$url'
+WEBDAV_USER='$user'
+WEBDAV_PASS='$pass'
 REMOTE_NAME='fake'
-SRC_PATH='src'
-DST_PATH='dst'
+SRC_PATH='$src'
+DST_PATH='$dst'
 TMP_DIR='$tmp/tmpdir'
 MIN_FREE_PERCENT='0'
 EOF
@@ -137,6 +142,122 @@ test_start_remote_fail_no_config_write() {
   echo "ok - webdav start remote failure is read-only"
 }
 
+test_reconfig_probe_fail_preserves_config() {
+  local tmp before
+  tmp="$(mktemp -d)"
+  CURRENT_TMP="$tmp"
+  mkdir -p "$tmp/state" "$tmp/tmpdir"
+  write_config "$tmp"
+  before="$(cat "$tmp/relay.conf")"
+
+  if printf '%s\n' \
+    "http://127.0.0.1:9999/dav" \
+    "bad-user" \
+    "bad-pass" \
+    "fake" \
+    "bad-src" \
+    "bad-dst" \
+    "$tmp/tmpdir" \
+    "0" | FAKE_RCLONE_MODE=config_probe_fail run_relay "$tmp" reconfig >/dev/null 2>/dev/null; then
+    fail "reconfig should fail when probe remote is unavailable"
+  fi
+
+  [[ "$(cat "$tmp/relay.conf")" == "$before" ]] || fail "failed reconfig should restore previous config"
+  ! grep -Eq '^config (delete|create) fake( |$)|^config update fake( |$)' "$tmp/rclone.calls" || fail "probe failure should not touch real remote"
+  grep -q '^--config .* config create fake_probe_' "$tmp/rclone.calls" || fail "reconfig should probe with temporary rclone config"
+
+  cleanup_tmp "$tmp"
+  CURRENT_TMP=""
+  echo "ok - webdav reconfig probe failure preserves config"
+}
+
+test_reconfig_path_fail_preserves_remote() {
+  local tmp before
+  tmp="$(mktemp -d)"
+  CURRENT_TMP="$tmp"
+  mkdir -p "$tmp/state" "$tmp/tmpdir"
+  write_config "$tmp"
+  before="$(cat "$tmp/relay.conf")"
+
+  if printf '%s\n' \
+    "http://127.0.0.1:9999/dav" \
+    "new-user" \
+    "new-pass" \
+    "fake" \
+    "missing-src" \
+    "missing-dst" \
+    "$tmp/tmpdir" \
+    "0" | FAKE_RCLONE_MODE=config_path_fail run_relay "$tmp" reconfig >/dev/null 2>/dev/null; then
+    fail "reconfig should fail when probe path check fails"
+  fi
+
+  [[ "$(cat "$tmp/relay.conf")" == "$before" ]] || fail "path check failure should restore previous config"
+  grep -q '^--config .* config create fake_probe_' "$tmp/rclone.calls" || fail "reconfig should create probe remote"
+  grep -q '^--config .* lsf fake_probe_.*:missing-src' "$tmp/rclone.calls" || fail "reconfig should check paths through probe remote"
+  ! grep -Eq '^config (delete|create) fake( |$)|^config update fake( |$)' "$tmp/rclone.calls" || fail "probe path failure should not touch real remote"
+
+  cleanup_tmp "$tmp"
+  CURRENT_TMP=""
+  echo "ok - webdav reconfig path failure preserves real remote"
+}
+
+test_reconfig_success_updates_config() {
+  local tmp
+  tmp="$(mktemp -d)"
+  CURRENT_TMP="$tmp"
+  mkdir -p "$tmp/state" "$tmp/tmpdir"
+  write_config "$tmp"
+
+  printf '%s\n' \
+    "http://127.0.0.1:9999/dav" \
+    "new-user" \
+    "new-pass" \
+    "fake" \
+    "new-src" \
+    "new-dst" \
+    "$tmp/tmpdir" \
+    "0" | FAKE_RCLONE_MODE=skip run_relay "$tmp" reconfig >/dev/null
+
+  grep -qx "WEBDAV_URL=http://127.0.0.1:9999/dav" "$tmp/relay.conf" || fail "reconfig should save new URL"
+  grep -qx "WEBDAV_USER=new-user" "$tmp/relay.conf" || fail "reconfig should save new user"
+  grep -qx "SRC_PATH=new-src" "$tmp/relay.conf" || fail "reconfig should save new source path"
+  grep -q '^config update fake ' "$tmp/rclone.config-writes" || fail "existing remote should be updated"
+  ! grep -q '^config delete fake' "$tmp/rclone.config-writes" || fail "reconfig should not delete real remote"
+
+  cleanup_tmp "$tmp"
+  CURRENT_TMP=""
+  echo "ok - webdav reconfig success updates config after probe"
+}
+
+test_reconfig_update_fail_restores_config() {
+  local tmp before
+  tmp="$(mktemp -d)"
+  CURRENT_TMP="$tmp"
+  mkdir -p "$tmp/state" "$tmp/tmpdir"
+  write_config "$tmp"
+  before="$(cat "$tmp/relay.conf")"
+
+  if printf '%s\n' \
+    "http://127.0.0.1:9999/dav" \
+    "new-user" \
+    "new-pass" \
+    "fake" \
+    "new-src" \
+    "new-dst" \
+    "$tmp/tmpdir" \
+    "0" | FAKE_RCLONE_MODE=config_update_fail run_relay "$tmp" reconfig >/dev/null 2>/dev/null; then
+    fail "reconfig should fail when final remote update fails"
+  fi
+
+  [[ "$(cat "$tmp/relay.conf")" == "$before" ]] || fail "failed final update should restore previous config"
+  grep -q '^config update fake ' "$tmp/rclone.config-writes" || fail "final update failure scenario should try update"
+  ! grep -q '^config delete fake' "$tmp/rclone.config-writes" || fail "final update failure should not delete real remote"
+
+  cleanup_tmp "$tmp"
+  CURRENT_TMP=""
+  echo "ok - webdav reconfig update failure restores config"
+}
+
 test_stop() {
   local tmp
   tmp="$(mktemp -d)"
@@ -166,13 +287,21 @@ test_stop() {
 case "${1:-all}" in
   skip) test_skip ;;
   remote-fail) test_start_remote_fail_no_config_write ;;
+  reconfig-fail) test_reconfig_probe_fail_preserves_config ;;
+  reconfig-path-fail) test_reconfig_path_fail_preserves_remote ;;
+  reconfig-success) test_reconfig_success_updates_config ;;
+  reconfig-update-fail) test_reconfig_update_fail_restores_config ;;
   stop) test_stop ;;
   all)
     test_skip
     test_start_remote_fail_no_config_write
+    test_reconfig_probe_fail_preserves_config
+    test_reconfig_path_fail_preserves_remote
+    test_reconfig_success_updates_config
+    test_reconfig_update_fail_restores_config
     test_stop
     ;;
   *)
-    fail "usage: $0 [skip|remote-fail|stop|all]"
+    fail "usage: $0 [skip|remote-fail|reconfig-fail|reconfig-path-fail|reconfig-success|reconfig-update-fail|stop|all]"
     ;;
 esac

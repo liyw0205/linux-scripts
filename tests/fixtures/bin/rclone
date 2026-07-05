@@ -10,8 +10,52 @@ log_call() {
 
 log_call "$*"
 
+if [[ "${1:-}" == "--config" ]]; then
+  shift 2
+  case "${1:-}" in
+    config)
+      case "${2:-}" in
+        create)
+          if [[ "$mode" == "config_create_fail" ]]; then
+            exit 1
+          fi
+          printf '%s\n' "$*" >> "$root/rclone.config-writes"
+          exit 0
+          ;;
+      esac
+      ;;
+    lsd)
+      if [[ "$mode" == "config_probe_fail" ]]; then
+        exit 1
+      fi
+      exit 0
+      ;;
+  esac
+fi
+
 case "${1:-}" in
   config)
+    case "${2:-}" in
+      create|update)
+        if [[ "$mode" == "config_update_fail" && "${2:-}" == "update" ]]; then
+          printf '%s\n' "$*" >> "$root/rclone.config-writes"
+          exit 1
+        fi
+        printf '%s\n' "$*" >> "$root/rclone.config-writes"
+        exit 0
+        ;;
+      delete)
+        printf '%s\n' "$*" >> "$root/rclone.config-writes"
+        exit 0
+        ;;
+    esac
+    exit 0
+    ;;
+  listremotes)
+    if [[ "$mode" == "remote_missing" ]]; then
+      exit 0
+    fi
+    echo "fake:"
     exit 0
     ;;
   lsd)
@@ -22,6 +66,9 @@ case "${1:-}" in
     ;;
   lsf)
     args=" $* "
+    if [[ "$mode" == "config_path_fail" ]]; then
+      exit 1
+    fi
     if [[ "$args" == *" -R "* ]]; then
       case "$mode" in
         skip) printf '%s\n' "same.bin" ;;
