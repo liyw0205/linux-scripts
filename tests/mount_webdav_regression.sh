@@ -129,7 +129,7 @@ EOF
 }
 
 TMP_DIR="$(mktemp -d)"
-mkdir -p "$TMP_DIR/bin" "$TMP_DIR/home/alice/.config/rclone" "$TMP_DIR/systemd" "$TMP_DIR/mount" "$TMP_DIR/cache"
+mkdir -p "$TMP_DIR/bin" "$TMP_DIR/home/alice/.config/rclone" "$TMP_DIR/systemd" "$TMP_DIR/mount" "$TMP_DIR/cache" "$TMP_DIR/dev" "$TMP_DIR/etc"
 : > "$TMP_DIR/calls.log"
 write_fake_bins "$TMP_DIR/bin"
 
@@ -143,6 +143,9 @@ export MOUNT_DIR="$TMP_DIR/mount"
 export CACHE_DIR="$TMP_DIR/cache"
 export REMOTE_NAME="webdav_remote"
 export RCLONE_BIN="$TMP_DIR/bin/rclone"
+export FUSE_DEVICE="$TMP_DIR/dev/fuse"
+export FUSE_CONF="$TMP_DIR/etc/fuse.conf"
+touch "$FUSE_DEVICE"
 
 # shellcheck disable=SC1090
 . "$ROOT_DIR/mount_webdav.sh"
@@ -150,6 +153,30 @@ export RCLONE_BIN="$TMP_DIR/bin/rclone"
 run_root() {
   "$@"
 }
+
+if declare -f check_fuse | grep -Eq '/dev/fuse|/etc/fuse.conf'; then
+  fail "check_fuse should use overrideable fuse paths"
+fi
+
+rm -f "$FUSE_DEVICE" "$FUSE_CONF"
+if (check_fuse) >/dev/null 2>/dev/null; then
+  fail "check_fuse should fail when fuse device is missing"
+fi
+[[ ! -e "$FUSE_CONF" ]] || fail "missing fuse device should not write fuse.conf"
+touch "$FUSE_DEVICE"
+
+check_fuse >/dev/null
+grep -qx "user_allow_other" "$FUSE_CONF" || fail "check_fuse should add user_allow_other"
+check_fuse >/dev/null
+[[ "$(grep -c '^user_allow_other$' "$FUSE_CONF")" -eq 1 ]] || fail "check_fuse should not duplicate user_allow_other"
+printf '%s\n' "# user_allow_other" > "$FUSE_CONF"
+check_fuse >/dev/null
+grep -qx "user_allow_other" "$FUSE_CONF" || fail "commented user_allow_other should not count as enabled"
+FUSE_CONF="$TMP_DIR/etc/fuse conf"
+rm -f "$FUSE_CONF"
+check_fuse >/dev/null
+grep -qx "user_allow_other" "$FUSE_CONF" || fail "check_fuse should support spaces in fuse conf path"
+! grep -Eq "rclone\\||systemctl\\|" "$TMP_DIR/calls.log" || fail "check_fuse should not call rclone or systemctl"
 
 conf_path="$(detect_rclone_conf_path alice)"
 [[ "$conf_path" == "$TMP_DIR/home/alice/.config/rclone/rclone.conf" ]] || fail "rclone config path should use sudo user"

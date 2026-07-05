@@ -9,6 +9,8 @@ CACHE_DIR="${CACHE_DIR:-/var/cache/rclone-webdav}"
 SERVICE_NAME="${SERVICE_NAME:-rclone-webdav.service}"
 SERVICE_DIR="${SERVICE_DIR:-/etc/systemd/system}"
 SERVICE_FILE="${SERVICE_FILE:-${SERVICE_DIR}/${SERVICE_NAME}}"
+FUSE_DEVICE="${FUSE_DEVICE:-${FUSE_DEV:-/dev/fuse}}"
+FUSE_CONF="${FUSE_CONF:-/etc/fuse.conf}"
 
 # ========= 工具 =========
 info()  { echo -e "\033[1;32m[INFO]\033[0m $*"; }
@@ -111,10 +113,11 @@ install_rclone() {
 }
 
 check_fuse() {
-  [[ -e /dev/fuse ]] || abort "/dev/fuse 不存在，请确认已启用 FUSE"
-  if ! grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null; then
-    warn "/etc/fuse.conf 未开启 user_allow_other，正在添加..."
-    run_root sh -c "echo 'user_allow_other' >> /etc/fuse.conf"
+  [[ -e "$FUSE_DEVICE" ]] || abort "$FUSE_DEVICE 不存在，请确认已启用 FUSE"
+  if ! grep -Eq '^[[:space:]]*user_allow_other([[:space:]]*(#.*)?)?$' "$FUSE_CONF" 2>/dev/null; then
+    warn "$FUSE_CONF 未开启 user_allow_other，正在添加..."
+    run_root mkdir -p "$(dirname "$FUSE_CONF")"
+    printf '%s\n' 'user_allow_other' | run_root tee -a "$FUSE_CONF" >/dev/null
   fi
 }
 

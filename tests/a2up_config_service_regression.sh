@@ -111,6 +111,8 @@ grep -qx "daemon-reload" "$FAKE_SYSTEMCTL_LOG" || fail "service writes should da
 doctor_output="$(doctor_cmd 2>&1 || true)"
 printf '%s\n' "$doctor_output" | grep -q "\[OK\] RPC 仅监听本机" || fail "doctor should accept local rpc"
 printf '%s\n' "$doctor_output" | grep -q "\[OK\] rpc-secret 已配置" || fail "doctor should see rpc secret"
+printf '%s\n' "$doctor_output" | grep -q "\[OK\] rpc-secret 字符安全" || fail "doctor should accept safe rpc secret"
+printf '%s\n' "$doctor_output" | grep -q "\[OK\] secret env 与配置一致" || fail "doctor should see matching config/env secret"
 printf '%s\n' "$doctor_output" | grep -q "\[OK\] 扫描服务密钥环境文件存在" || fail "doctor should see secret env"
 
 sed -i 's/^rpc-listen-all=false$/rpc-listen-all=true/' "$CONF_FILE"
@@ -119,5 +121,53 @@ printf '%s\n' "$doctor_output" | grep -q "\[NO\] rpc-listen-all 不是 false" ||
 rm -f "$SECRET_ENV_FILE"
 doctor_output="$(doctor_cmd 2>&1 || true)"
 printf '%s\n' "$doctor_output" | grep -q "\[NO\] 扫描服务密钥环境文件不存在" || fail "doctor should report missing secret env"
+
+cat > "$CONF_FILE" <<'EOF'
+dir=/keep/custom
+enable-rpc=true
+rpc-listen-all=false
+EOF
+RPC_SECRET="migratedSecret_456"
+ensure_conf_ready
+grep -qx "dir=/keep/custom" "$CONF_FILE" || fail "secret migration should preserve existing config"
+grep -qx "rpc-secret=migratedSecret_456" "$CONF_FILE" || fail "missing rpc-secret should be added"
+[[ "$(grep -c '^rpc-secret=' "$CONF_FILE")" -eq 1 ]] || fail "missing secret migration should write exactly one rpc-secret"
+
+cat > "$CONF_FILE" <<'EOF'
+dir=/keep/custom
+rpc-secret=bad secret with spaces
+rpc-secret=second-bad-secret
+EOF
+RPC_SECRET=""
+ensure_conf_ready >/dev/null
+migrated_secret="$(read_conf_rpc_secret)"
+is_safe_rpc_secret "$migrated_secret" || fail "unsafe existing rpc-secret should be replaced with a safe value"
+[[ "$(grep -c '^rpc-secret=' "$CONF_FILE")" -eq 1 ]] || fail "unsafe secret migration should collapse duplicate rpc-secret lines"
+
+cat > "$CONF_FILE" <<'EOF'
+dir=/keep/custom
+rpc-secret=firstSafe_123
+rpc-secret=secondSafe_456
+EOF
+RPC_SECRET=""
+ensure_conf_ready
+grep -qx "rpc-secret=firstSafe_123" "$CONF_FILE" || fail "duplicate safe rpc-secret should keep first active secret"
+[[ "$(grep -c '^rpc-secret=' "$CONF_FILE")" -eq 1 ]] || fail "duplicate safe rpc-secret should be collapsed"
+
+cat > "$CONF_FILE" <<'EOF'
+dir=/keep/custom
+rpc-listen-all=false
+rpc-secret=oldSafeSecret_123
+EOF
+RPC_SECRET="newSafeSecret_456"
+ensure_conf_ready
+grep -qx "rpc-secret=newSafeSecret_456" "$CONF_FILE" || fail "explicit RPC_SECRET should sync config"
+write_secret_env
+doctor_output="$(doctor_cmd 2>&1 || true)"
+printf '%s\n' "$doctor_output" | grep -q "\[OK\] secret env 与配置一致" || fail "doctor should report synced explicit secret"
+
+sed -i 's/^ARIA2_RPC_SECRET=.*/ARIA2_RPC_SECRET=differentSecret_789/' "$SECRET_ENV_FILE"
+doctor_output="$(doctor_cmd 2>&1 || true)"
+printf '%s\n' "$doctor_output" | grep -q "\[NO\] secret env 与配置不一致" || fail "doctor should detect env/config secret mismatch"
 
 echo "ok - a2up config and service safety"

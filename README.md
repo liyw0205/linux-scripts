@@ -444,18 +444,20 @@ napcat -q <QQ号> start
 
 ```bash
 make validate
+make test
 make lint
 make format
 ```
 
 说明：
 
-- `make validate` 会动态发现仓库内的 `.sh` 文件并执行 `bash -n`。
-- 如果本机安装了 `shellcheck` 和 `shfmt`，`make validate` 会自动执行可选 lint。
+- `make validate` 会动态发现仓库内的 `.sh` 文件并执行 `bash -n`，随后运行回归测试。
+- 如果本机安装了 `shellcheck` 和 `shfmt`，`make validate` 会自动执行可选 lint；缺失时会跳过。
+- `make test` 会运行回归测试；如果安装了 `bats` / `bats-core`，会优先复用 bats 包装，否则使用 Bash fallback。
 - `make lint` 等同严格模式，存在可选 lint 问题时返回失败。
-- `make format` 复用成熟工具 `shfmt` 格式化脚本，不手写格式化器。
+- `make format` 复用成熟工具 `shfmt` 格式化脚本，不手写格式化器，并覆盖根目录、`scripts/`、`tests/` 下的 `.sh` 文件。
 - 可以安装 `pre-commit` 后执行 `pre-commit install`，提交前会复用 `make validate`。
-- 后续需要测试时优先复用 `bats-core`，需要 YAML 结构化修改时优先复用 `yq`。
+- 需要 YAML 结构化修改时优先复用 `yq`，缺失时保留脚本内 fallback。
 
 ## 备注
 

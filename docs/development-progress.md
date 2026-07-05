@@ -270,13 +270,45 @@
 - `a2up.sh ensure_conf_ready` 对“已有配置文件但缺失/不安全 rpc-secret”的场景仍只更新内存 secret，不自动重写配置；后续可评估是否需要迁移修复。
 - `mount_webdav.sh check_fuse` 仍直接检查 `/dev/fuse` 和 `/etc/fuse.conf`，尚未拆成可配置路径，因此本阶段未覆盖该写入路径。
 
-## 阶段 7 预期
+## 阶段 7：剩余一致性和可测试性修复
 
-继续处理剩余一致性和可测试性：
+日期：2026-07-05
 
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `a2up.sh`、`mount_webdav.sh` 和测试工具链审查。
 - `a2up.sh`
-  - 评估并修复已有配置缺失/不安全 `rpc-secret` 时是否应自动重写配置文件，避免内存/env secret 与配置文件不一致。
+  - 新增 `sync_conf_rpc_secret`，对已有 `aria2c.conf` 只定点修复 `rpc-secret`，不全量覆盖用户配置。
+  - `ensure_conf_ready` 在已有配置缺失、不安全、重复或与当前 `RPC_SECRET` 不一致时，会同步写回一条安全 `rpc-secret`。
+  - `doctor` 增加 `rpc-secret` 字符安全检查，以及 secret env 与配置一致性检查。
+  - 回归测试覆盖缺失 secret、不安全 secret、重复安全 secret、显式 `RPC_SECRET` 覆盖旧值、env/config 不一致诊断。
 - `mount_webdav.sh`
-  - 将 `check_fuse` 的 `/dev/fuse`、`/etc/fuse.conf` 拆成可覆盖变量，并增加无副作用测试。
+  - 新增 `FUSE_DEVICE` / `FUSE_CONF` 覆盖入口，并保留旧 `FUSE_DEV` 兼容默认值。
+  - `check_fuse` 改为使用可覆盖路径，识别前导空白和行尾注释形式的 `user_allow_other`，不会把注释行当作启用。
+  - `check_fuse` 写入逻辑改为 `tee -a "$FUSE_CONF"`，支持含空格路径并避免字符串拼接执行。
+  - 回归测试覆盖缺失 FUSE 设备、缺失 fuse.conf 自动写入、避免重复追加、注释行不算启用、含空格 fuse.conf 路径。
 - 测试工具链
-  - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。
+  - `make format` 现在用 `find` 覆盖根目录、`scripts/`、`tests/` 下的 `.sh` 文件，和校验发现范围保持一致。
+  - README 更新 `make validate`、`make test`、`shellcheck` / `shfmt` 可选 lint、`bats` fallback 和 `shfmt` 格式化范围说明。
+
+### 验证结果
+
+- `bash tests/a2up_config_service_regression.sh` 通过。
+- `bash tests/mount_webdav_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 aria2、systemd、rclone mount、WebDAV、cloudflared、Mihomo 重启或外部网络操作。
+- `mount_webdav.sh check_fuse` 已可测试，但真实系统上仍要求实际 `/dev/fuse` 和 `/etc/fuse.conf` 权限。
+
+## 阶段 8 预期
+
+继续收敛剩余脚本一致性和用户文档：
+
+- 评估 `cf.sh`、`mihomo.sh`、`a2up.sh`、`mount_webdav.sh` 的 README 说明是否和当前安全默认值、测试能力一致。
+- 继续审查其他脚本的可测试性和高风险写入路径，优先补无副作用回归测试。
+- 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。

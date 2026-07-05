@@ -150,6 +150,45 @@ read_conf_rpc_secret(){
   }' "$CONF_FILE"
 }
 
+sync_conf_rpc_secret(){
+  [[ -f "$CONF_FILE" ]] || return 0
+  ensure_rpc_secret
+
+  local current secret_count tmp
+  current="$(read_conf_rpc_secret || true)"
+  secret_count="$(grep -Ec '^[[:space:]]*rpc-secret[[:space:]]*=' "$CONF_FILE" 2>/dev/null || true)"
+  secret_count="${secret_count:-0}"
+  if [[ "$current" == "$RPC_SECRET" && "$secret_count" == "1" ]]; then
+    return 0
+  fi
+
+  tmp="$(mktemp "${TMPDIR:-/tmp}/a2up-conf.XXXXXX")"
+  if ! awk -v secret="$RPC_SECRET" '
+    BEGIN { written = 0 }
+    /^[[:space:]]*rpc-secret[[:space:]]*=/ {
+      if (written == 0) {
+        print "rpc-secret=" secret
+        written = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (written == 0) {
+        print "rpc-secret=" secret
+      }
+    }
+  ' "$CONF_FILE" > "$tmp"; then
+    rm -f "$tmp"
+    die "无法生成修复后的 aria2 配置"
+  fi
+  run_root cp "$tmp" "$CONF_FILE" || {
+    rm -f "$tmp"
+    die "无法写回 aria2 配置: $CONF_FILE"
+  }
+  rm -f "$tmp"
+}
+
 ensure_rpc_secret(){
   local existing
 
@@ -797,7 +836,7 @@ ensure_conf_ready(){
     warn "aria2 配置不存在，自动重建: $CONF_FILE"
     write_conf
   else
-    ensure_rpc_secret
+    sync_conf_rpc_secret
   fi
 }
 
@@ -1078,12 +1117,29 @@ doctor_cmd(){
   echo
   echo "== RPC 安全检查 =="
   if [[ -f "$CONF_FILE" ]]; then
+    local conf_secret env_secret
+    conf_secret="$(read_conf_rpc_secret || true)"
+    env_secret=""
+    if [[ -f "$SECRET_ENV_FILE" ]]; then
+      env_secret="$(awk -F= '/^ARIA2_RPC_SECRET=/ {print $2; exit}' "$SECRET_ENV_FILE")"
+    fi
+
     grep -qE '^[[:space:]]*rpc-listen-all=false[[:space:]]*$' "$CONF_FILE" \
       && echo "[OK] RPC 仅监听本机" \
       || echo "[NO] rpc-listen-all 不是 false"
-    [[ -n "$(read_conf_rpc_secret || true)" ]] \
+    [[ -n "$conf_secret" ]] \
       && echo "[OK] rpc-secret 已配置" \
       || echo "[NO] rpc-secret 未配置"
+    if [[ -n "$conf_secret" ]]; then
+      is_safe_rpc_secret "$conf_secret" \
+        && echo "[OK] rpc-secret 字符安全" \
+        || echo "[NO] rpc-secret 包含不安全字符"
+    fi
+    if [[ -n "$env_secret" && -n "$conf_secret" ]]; then
+      [[ "$env_secret" == "$conf_secret" ]] \
+        && echo "[OK] secret env 与配置一致" \
+        || echo "[NO] secret env 与配置不一致"
+    fi
   else
     echo "[NO] 配置文件不存在，无法检查 RPC"
   fi
