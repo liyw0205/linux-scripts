@@ -88,10 +88,49 @@
 - `mihomo.sh` 不静默迁移已有用户配置中的 `external-controller: 0.0.0.0:9090`，只补齐缺失 `secret`，避免破坏已有远程管理方式。
 - `a2up.sh` 仍允许用户显式设置 `RPC_LISTEN_ALL=true` 后重配置，以兼容确实需要远程 RPC 的场景。
 
-## 阶段 3 预期
+## 阶段 3：运行可靠性修复
 
-优先处理 P1 运行可靠性问题：
+日期：2026-07-05
 
-- 修复 `mount_webdav.sh` 中 rclone remote 写入用户和 systemd 运行用户不一致的问题。
-- 修复 `cf.sh` service 文件写入未走 `run_root`、URL 写入转义和架构检测问题。
-- 为上述改动补充无副作用验证路径。
+### 已完成
+
+- 使用主代理 + 2 个子代理完成 `mount_webdav.sh` 和 `cf.sh` 运行可靠性审查。
+- `mount_webdav.sh`
+  - 新增以服务运行用户执行命令的 helper。
+  - rclone remote 创建、删除、连通性测试和存在性检查统一使用服务运行用户和同一个 `--config`。
+  - `detect_rclone_conf_path` 改为以服务运行用户解析配置路径，避免 `sudo/root` 上下文误拿 root 配置。
+  - 服务文件写入改为临时文件 + `install -m 0644`，不再用 `bash -c cat >`。
+  - 新增 `fusermount3` / `fusermount` 检测，`ExecStop` 和 `stop` 复用同一路径。
+- `cf.sh`
+  - service 文件写入改为 `run_root tee` 并设置 `0644`，避免非 root 重定向失败。
+  - cloudflared 下载新增架构检测，支持 amd64、arm64、arm、386；下载后先执行临时文件 `--version` 验证，再安装到目标路径。
+  - 可预测临时文件改用 `mktemp`。
+  - YAML 读写增加单引号 quote/unquote，`set-url` 不再使用 sed replacement 拼接用户 URL。
+  - `rename` 在删除旧 service 前记录 enabled 状态，避免重命名后误丢开机启用状态。
+
+### 验证结果
+
+- `bash -n mount_webdav.sh` 通过。
+- `bash -n cf.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+- `cf.sh set-url` 无副作用临时目录测试通过，覆盖 `#`、`&`、反斜杠和单引号 URL。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck` 和 `shfmt`，可选 lint 被跳过。
+- 未执行真实 WebDAV remote 配置、rclone mount、cloudflared 登录、Tunnel 创建或 systemd 启停。
+- `cf.sh` 仍保留代理镜像下载列表；后续可考虑允许关闭镜像代理或固定可信下载源。
+
+## 阶段 4 预期
+
+继续处理剩余 P1/P2 可靠性和安全问题：
+
+- `webdav_copyto_relay.sh`
+  - 停止任务时确保终止正在运行的 `rclone copyto` 子进程。
+  - 远端大小判断改用结构化字节输出，避免解析人类可读文本。
+- `cf.sh`
+  - 进一步收敛临时文件和配置写入失败时的回滚行为。
+- `mihomo.sh`
+  - 用 `mktemp` 替换固定 `/tmp` 文件路径。
+  - 端口修改和 YAML 写入继续减少 grep/sed 误伤。

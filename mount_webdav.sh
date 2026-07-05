@@ -44,21 +44,47 @@ detect_home_of_user() {
   getent passwd "$u" | awk -F: '{print $6}'
 }
 
+run_as_user() {
+  local user="$1"
+  shift
+
+  if [[ "$(id -u "$user")" -eq "$(id -u)" ]]; then
+    "$@"
+  elif need_cmd sudo; then
+    sudo -H -u "$user" "$@"
+  elif need_cmd runuser; then
+    runuser -u "$user" -- "$@"
+  else
+    abort "需要 sudo 或 runuser 才能以 ${user} 执行命令"
+  fi
+}
+
 detect_rclone_conf_path() {
-  # 优先用 rclone 自己告诉我们的路径（最准确）
+  local run_user="${1:-$(detect_run_user)}"
   local conf
-  conf="$(rclone config file 2>/dev/null | awk -F': ' '/Configuration file is stored at:/ {print $2}')"
+
+  conf="$(run_as_user "$run_user" rclone config file 2>/dev/null | awk -F': ' '/Configuration file is stored at:/ {print $2}' || true)"
   if [[ -n "${conf:-}" ]]; then
     echo "$conf"
     return 0
   fi
 
-  # 兜底：按用户 home 推导
-  local run_user run_home
-  run_user="$(detect_run_user)"
+  local run_home
   run_home="$(detect_home_of_user "$run_user")"
   [[ -z "${run_home:-}" ]] && run_home="$HOME"
   echo "${run_home}/.config/rclone/rclone.conf"
+}
+
+detect_fusermount_bin() {
+  if need_cmd fusermount3; then
+    command -v fusermount3
+  elif need_cmd fusermount; then
+    command -v fusermount
+  elif [[ -x /bin/fusermount ]]; then
+    echo /bin/fusermount
+  else
+    abort "找不到 fusermount3/fusermount"
+  fi
 }
 
 # ========= 安装 =========
@@ -93,7 +119,13 @@ check_fuse() {
 
 # ========= remote 配置 =========
 config_remote() {
+  local run_user conf_path
+  run_user="$(detect_run_user)"
+  conf_path="$(detect_rclone_conf_path "$run_user")"
+
   info "开始配置 WebDAV remote: ${REMOTE_NAME}"
+  info "配置用户: ${run_user}"
+  info "配置文件: ${conf_path}"
   read -r -p "WebDAV URL (如: http://127.0.0.1:5244/dav): " WEBDAV_URL
   read -r -p "vendor [other/nextcloud/owncloud/sharepoint] (默认other): " WEBDAV_VENDOR
   [[ -z "${WEBDAV_VENDOR:-}" ]] && WEBDAV_VENDOR="other"
@@ -102,44 +134,49 @@ config_remote() {
 
   [[ -n "${WEBDAV_URL:-}" && -n "${WEBDAV_USER:-}" && -n "${WEBDAV_PASS:-}" ]] || abort "URL/用户名/密码不能为空"
 
-  rclone config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
-  rclone config create "$REMOTE_NAME" webdav \
+  run_as_user "$run_user" mkdir -p "$(dirname "$conf_path")"
+  run_as_user "$run_user" rclone --config "$conf_path" config delete "$REMOTE_NAME" >/dev/null 2>&1 || true
+  run_as_user "$run_user" rclone --config "$conf_path" config create "$REMOTE_NAME" webdav \
     url="$WEBDAV_URL" \
     vendor="$WEBDAV_VENDOR" \
     user="$WEBDAV_USER" \
-    pass="$(rclone obscure "$WEBDAV_PASS")" >/dev/null
+    pass="$(run_as_user "$run_user" rclone obscure "$WEBDAV_PASS")" >/dev/null
 
   info "remote 已创建: $REMOTE_NAME"
-  rclone lsd "${REMOTE_NAME}:" >/dev/null 2>&1 || abort "remote 连接测试失败，请检查参数"
+  run_as_user "$run_user" rclone --config "$conf_path" lsd "${REMOTE_NAME}:" >/dev/null 2>&1 || abort "remote 连接测试失败，请检查参数"
   info "remote 连接测试通过"
 }
 
 check_remote_exists() {
   local conf_path="$1"
-  rclone --config "$conf_path" listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:$" \
+  local run_user="${2:-$(detect_run_user)}"
+  run_as_user "$run_user" rclone --config "$conf_path" listremotes 2>/dev/null | grep -q "^${REMOTE_NAME}:$" \
     || abort "在配置文件 $conf_path 中未找到 remote: ${REMOTE_NAME}"
 }
 
 # ========= 服务 =========
 write_service() {
-  local run_user run_group run_home conf_path
+  local run_user run_group run_home conf_path fusermount_bin
+  local tmp_service
   run_user="$(detect_run_user)"
   run_group="$(id -gn "$run_user")"
   run_home="$(detect_home_of_user "$run_user")"
   [[ -z "${run_home:-}" ]] && run_home="$HOME"
 
-  conf_path="$(detect_rclone_conf_path)"
+  conf_path="$(detect_rclone_conf_path "$run_user")"
+  fusermount_bin="$(detect_fusermount_bin)"
 
   [[ -n "${RCLONE_BIN:-}" ]] || RCLONE_BIN="$(command -v rclone || true)"
   [[ -x "${RCLONE_BIN:-}" ]] || abort "找不到 rclone 可执行文件"
 
   # 提前检查 remote 是否在这个 conf 里，避免服务启动后才报错
-  check_remote_exists "$conf_path"
+  check_remote_exists "$conf_path" "$run_user"
 
   run_root mkdir -p "$MOUNT_DIR" "$CACHE_DIR"
   run_root chown -R "$run_user:$run_group" "$MOUNT_DIR" "$CACHE_DIR"
 
-  run_root bash -c "cat > '$SERVICE_FILE' <<EOF
+  tmp_service="$(mktemp)"
+  cat > "$tmp_service" <<EOF
 [Unit]
 Description=Rclone WebDAV Mount
 After=network-online.target
@@ -161,18 +198,24 @@ ExecStart=${RCLONE_BIN} mount ${REMOTE_NAME}:/ ${MOUNT_DIR} \\
   --cache-dir=${CACHE_DIR} \\
   --buffer-size=32M \\
   --log-level=INFO
-ExecStop=/bin/fusermount -uz ${MOUNT_DIR}
+ExecStop=${fusermount_bin} -uz ${MOUNT_DIR}
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF"
+EOF
+  run_root install -m 0644 "$tmp_service" "$SERVICE_FILE" || {
+    rm -f "$tmp_service"
+    abort "写入服务文件失败: $SERVICE_FILE"
+  }
+  rm -f "$tmp_service"
 
   run_root systemctl daemon-reload
   info "服务文件已写入: $SERVICE_FILE"
   info "运行用户: $run_user"
   info "配置文件: $conf_path"
+  info "卸载命令: $fusermount_bin"
 }
 
 start_service() {
@@ -188,9 +231,11 @@ start_service() {
 }
 
 stop_service() {
+  local fusermount_bin
   run_root systemctl stop "$SERVICE_NAME" 2>/dev/null || true
   if mountpoint -q "$MOUNT_DIR"; then
-    run_root fusermount -uz "$MOUNT_DIR" || true
+    fusermount_bin="$(detect_fusermount_bin)"
+    run_root "$fusermount_bin" -uz "$MOUNT_DIR" || true
   fi
   info "已停止并卸载"
 }

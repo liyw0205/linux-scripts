@@ -69,6 +69,62 @@ service_file() {
     echo "${SERVICE_DIR}/$(service_name "$name")"
 }
 
+yaml_quote() {
+    local value="$1"
+    value="$(printf '%s' "$value" | sed "s/'/''/g")"
+    printf "'%s'" "$value"
+}
+
+yaml_unquote() {
+    local value="$1"
+    if [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+        value="${value:1:${#value}-2}"
+        value="${value//"''"/"'"}"
+    fi
+    printf '%s\n' "$value"
+}
+
+read_yaml_value() {
+    local cfg="$1"
+    local key="$2"
+    local value
+    value="$(awk -v key="$key" '
+        index($0, key ":") == 1 {
+            value = substr($0, length(key) + 2)
+            sub(/^[[:space:]]+/, "", value)
+            print value
+            exit
+        }
+    ' "$cfg")"
+    yaml_unquote "$value"
+}
+
+detect_cloudflared_asset() {
+    local arch
+    if need_cmd dpkg; then
+        arch="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+    else
+        arch="$(uname -m)"
+    fi
+    case "$arch" in
+        x86_64|amd64)
+            echo "cloudflared-linux-amd64"
+            ;;
+        aarch64|arm64)
+            echo "cloudflared-linux-arm64"
+            ;;
+        armv7l|armv6l|armhf|armel)
+            echo "cloudflared-linux-arm"
+            ;;
+        i386|i686|386)
+            echo "cloudflared-linux-386"
+            ;;
+        *)
+            abort "不支持的架构: $arch"
+            ;;
+    esac
+}
+
 # ================== 代理测速/下载 ==================
 proxy_latency_ms() {
     local p="$1"
@@ -91,7 +147,8 @@ proxy_latency_ms() {
 }
 
 sorted_proxies() {
-    local f="${TMP_ROOT}/cf_proxy_latency.$$"
+    local f
+    f="$(mktemp "${TMP_ROOT%/}/cf_proxy_latency.XXXXXX")"
     : > "$f"
     for p in $PROXY_LIST; do
         local l
@@ -156,16 +213,25 @@ ensure_cloudflared() {
 
 install_cloudflared() {
     ui_print "未检测到 cloudflared，开始安装..."
-    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-    local tmp="/tmp/cloudflared-linux-amd64.$$"
+    local asset url tmp
+    asset="$(detect_cloudflared_asset)"
+    url="https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}"
+    tmp="$(mktemp "${TMP_ROOT%/}/${asset}.XXXXXX")"
 
     if ! download_with_proxies "$url" "$tmp"; then
+        rm -f "$tmp"
         abort "下载 cloudflared 失败，请检查网络"
     fi
 
+    chmod +x "$tmp"
+    if ! "$tmp" --version >/dev/null 2>&1; then
+        rm -f "$tmp"
+        abort "下载的 cloudflared 无法运行，请检查架构或文件完整性"
+    fi
+
     run_root mkdir -p "$(dirname "$CLOUDFLARED_BIN")"
-    run_root mv "$tmp" "$CLOUDFLARED_BIN"
-    run_root chmod +x "$CLOUDFLARED_BIN"
+    run_root install -m 0755 "$tmp" "$CLOUDFLARED_BIN"
+    rm -f "$tmp"
 
     "$CLOUDFLARED_BIN" --version >/dev/null || abort "安装验证失败"
     ui_print "cloudflared 安装完成: $($CLOUDFLARED_BIN --version | head -n 1)"
@@ -189,17 +255,17 @@ tunnel_exists_remote_by_id() {
 
 read_tunnel_id_from_yml() {
     local cfg="$1"
-    awk '/^[[:space:]]*tunnel:[[:space:]]*/{print $2; exit}' "$cfg"
+    read_yaml_value "$cfg" "tunnel"
 }
 
 read_credentials_from_yml() {
     local cfg="$1"
-    awk '/^[[:space:]]*credentials-file:[[:space:]]*/{print $2; exit}' "$cfg"
+    read_yaml_value "$cfg" "credentials-file"
 }
 
 read_url_from_yml() {
     local cfg="$1"
-    awk '/^[[:space:]]*url:[[:space:]]*/{print $2; exit}' "$cfg"
+    read_yaml_value "$cfg" "url"
 }
 
 # ================== 运行清理 ==================
@@ -296,18 +362,24 @@ write_tunnel_yml() {
     local name="$1"
     local tunnel_id="$2"
     local url="$3"
-    cat > "${CLOUDFLARED_HOME}/${name}.yml" <<EOF
-url: $url
-tunnel: $tunnel_id
-credentials-file: ${CLOUDFLARED_HOME}/${tunnel_id}.json
+    local cred="${4:-${CLOUDFLARED_HOME}/${tunnel_id}.json}"
+    local cfg="${CLOUDFLARED_HOME}/${name}.yml"
+    local tmp
+    tmp="$(mktemp "${CLOUDFLARED_HOME}/.${name}.yml.XXXXXX")"
+    cat > "$tmp" <<EOF
+url: $(yaml_quote "$url")
+tunnel: $(yaml_quote "$tunnel_id")
+credentials-file: $(yaml_quote "$cred")
 EOF
+    mv "$tmp" "$cfg"
 }
 
 write_service_file() {
     local name="$1"
     local svc_file
     svc_file="$(service_file "$name")"
-    cat > "$svc_file" <<EOF
+    run_root mkdir -p "$SERVICE_DIR"
+    run_root tee "$svc_file" >/dev/null <<EOF
 [Unit]
 Description=Cloudflare Tunnel (${name})
 After=network-online.target
@@ -322,6 +394,7 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 EOF
+    run_root chmod 0644 "$svc_file"
 }
 
 # ================== 命令 ==================
@@ -447,7 +520,7 @@ rename_cmd() {
     tunnel_exists_remote_by_name "$old_name" || abort "远程不存在旧隧道: $old_name"
     ! tunnel_exists_remote_by_name "$new_name" || abort "远程已存在新名称: $new_name"
 
-    local id old_cfg new_cfg old_svc new_svc url cred
+    local id old_cfg new_cfg old_svc new_svc url cred was_enabled
     id="$(get_tunnel_id_by_name "$old_name")"
     [[ -n "$id" ]] || abort "无法获取隧道 ID: $old_name"
 
@@ -455,6 +528,10 @@ rename_cmd() {
     new_cfg="${CLOUDFLARED_HOME}/${new_name}.yml"
     old_svc="$(service_name "$old_name")"
     new_svc="$(service_name "$new_name")"
+    was_enabled=0
+    if systemctl is-enabled "$old_svc" >/dev/null 2>&1; then
+        was_enabled=1
+    fi
 
     stop_local_tunnel_runtime "$old_name"
 
@@ -472,11 +549,7 @@ rename_cmd() {
         rm -f "$old_cfg"
     fi
 
-    cat > "$new_cfg" <<EOF
-url: $url
-tunnel: $id
-credentials-file: $cred
-EOF
+    write_tunnel_yml "$new_name" "$id" "$url" "$cred"
 
     local old_svc_file new_svc_file
     old_svc_file="$(service_file "$old_name")"
@@ -485,7 +558,7 @@ EOF
     write_service_file "$new_name"
     run_root systemctl daemon-reload
 
-    if systemctl is-enabled "$old_svc" >/dev/null 2>&1; then
+    if [[ "$was_enabled" -eq 1 ]]; then
         run_root systemctl enable "$new_svc" >/dev/null 2>&1 || true
         run_root systemctl start "$new_svc" >/dev/null 2>&1 || true
     fi
@@ -502,10 +575,14 @@ sync_cmd() {
     require_systemd
 
     ui_print "按远端列表同步本地配置和服务文件"
-    local tmp="${TMP_ROOT}/cf_sync_list.$$"
+    local tmp
+    tmp="$(mktemp "${TMP_ROOT%/}/cf_sync_list.XXXXXX")"
     "$CLOUDFLARED_BIN" tunnel list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9a-f-]{36}$/ {print $1, $2}' > "$tmp" || true
 
-    [[ -s "$tmp" ]] || abort "未获取到远端隧道列表"
+    if [[ ! -s "$tmp" ]]; then
+        rm -f "$tmp"
+        abort "未获取到远端隧道列表"
+    fi
 
     while read -r id name; do
         [[ -z "${id:-}" || -z "${name:-}" ]] && continue
@@ -552,12 +629,12 @@ set_url_cmd() {
     local cfg="${CLOUDFLARED_HOME}/${name}.yml"
     [[ -f "$cfg" ]] || abort "配置文件不存在: $cfg"
 
-    if grep -qE '^url:' "$cfg"; then
-        sed -i "s#^url:.*#url: ${url}#" "$cfg"
-    else
-        local tmp="${cfg}.tmp"
-        { echo "url: ${url}"; cat "$cfg"; } > "$tmp" && mv "$tmp" "$cfg"
-    fi
+    local id cred
+    id="$(read_tunnel_id_from_yml "$cfg")"
+    cred="$(read_credentials_from_yml "$cfg")"
+    [[ -n "${id:-}" ]] || abort "无法识别 tunnel 字段: $cfg"
+    [[ -n "${cred:-}" ]] || cred="${CLOUDFLARED_HOME}/${id}.json"
+    write_tunnel_yml "$name" "$id" "$url" "$cred"
 
     ui_print "已修改穿透地址: $name -> $url"
     echo "提示：如需立即生效，请执行 cf restart $name"
@@ -584,11 +661,7 @@ repair_cmd() {
     [[ -z "$cred" ]] && cred="${CLOUDFLARED_HOME}/${id}.json"
     [[ -z "$url" ]] && url="http://127.0.0.1:80"
 
-    cat > "$cfg" <<EOF
-url: $url
-tunnel: $id
-credentials-file: $cred
-EOF
+    write_tunnel_yml "$name" "$id" "$url" "$cred"
 
     ui_print "已修复: $cfg"
 }
