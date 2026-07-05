@@ -48,8 +48,11 @@ PYEOF
     chmod +x "$venv/bin/python"
     printf '#!/usr/bin/env sh\nexit 0\n' > "$venv/bin/pip"
     chmod +x "$venv/bin/pip"
-    cat > "$venv/bin/activate" <<'ACTEOF'
-export PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
+    cat > "$venv/bin/activate" <<ACTEOF
+VIRTUAL_ENV="$venv"
+export VIRTUAL_ENV
+PATH="\$VIRTUAL_ENV/bin:\$PATH"
+export PATH
 export FAKE_ASTR_ACTIVATED=1
 ACTEOF
     exit 0
@@ -83,6 +86,21 @@ assert_no_astr_temp() {
     if find "$dir" -maxdepth 1 \( -name '.app.clone.*' -o -name '.venv.venv.*' -o -name '.venv.requirements.*' -o -name '.venv.backup.*' \) -print -quit | grep -q .; then
         fail "temporary AstrBot artifact leaked in $dir"
     fi
+}
+
+assert_venv_activates() {
+    local venv="$1"
+    local python_path pip_path
+
+    (
+        # shellcheck disable=SC1090
+        source "$venv/bin/activate"
+        [[ "${VIRTUAL_ENV:-}" == "$venv" ]] || exit 20
+        python_path="$(command -v python || true)"
+        pip_path="$(command -v pip || true)"
+        [[ "$python_path" == "$venv/bin/python" ]] || exit 21
+        [[ "$pip_path" == "$venv/bin/pip" ]] || exit 22
+    ) || fail "venv activation should target final venv path: $venv"
 }
 
 set_astr_paths() {
@@ -131,13 +149,27 @@ mkdir -p "$VENV_DIR"
 ASTR_REPO_URL="$repo" install_astr >/dev/null
 [[ -d "$APP_DIR/.git" ]] || fail "existing app repo should be preserved"
 [[ -x "$VENV_DIR/bin/python" ]] || fail "missing venv should be created through staging"
+assert_venv_activates "$VENV_DIR"
 assert_no_astr_temp "$TMP_DIR/existing-app"
+
+set_astr_paths repair-broken
+git clone -q "$repo" "$APP_DIR"
+bad_venv="$TMP_DIR/repair-broken/.venv.venv.bad"
+python3 -m venv "$bad_venv"
+mv "$bad_venv" "$VENV_DIR"
+if venv_is_usable "$VENV_DIR"; then
+    fail "moved venv should be detected as unusable"
+fi
+ASTR_REPO_URL="$repo" install_astr >/dev/null
+assert_venv_activates "$VENV_DIR"
+assert_no_astr_temp "$TMP_DIR/repair-broken"
 
 set_astr_paths success
 ASTR_REPO_URL="$repo" install_astr >/dev/null
 [[ -d "$APP_DIR/.git" ]] || fail "install should publish app repo"
 [[ -x "$VENV_DIR/bin/python" ]] || fail "install should publish venv python"
 [[ -f "$VENV_DIR/pip-installed" ]] || fail "install should run pip in staging venv"
+assert_venv_activates "$VENV_DIR"
 
 old_head="$(git -C "$APP_DIR" rev-parse HEAD)"
 printf '%s\n' "old venv" > "$VENV_DIR/marker"
@@ -153,15 +185,24 @@ FAKE_ASTR_REQUIRE_ACTIVATED=1 update_astr >/dev/null
 grep -qx "new-requirement" "$APP_DIR/requirements.txt" || fail "update should git pull latest requirements"
 grep -qx "old venv" "$VENV_DIR/marker" || fail "update should reuse existing venv"
 grep -q -- "-r $APP_DIR/requirements.txt" "$FAKE_ASTR_LOG" || fail "update should install requirements from app dir"
+assert_venv_activates "$VENV_DIR"
 
-update_head="$(git -C "$APP_DIR" rev-parse HEAD)"
 printf '%s\n' "newer-requirement" > "$repo/requirements.txt"
 git -C "$repo" add requirements.txt
 git -C "$repo" commit -q -m "second update"
+FAKE_ASTR_REQUIRE_ACTIVATED=1 patch_astr >/dev/null
+grep -qx "newer-requirement" "$APP_DIR/requirements.txt" || fail "patch should fast-forward app code"
+assert_venv_activates "$VENV_DIR"
+
+update_head="$(git -C "$APP_DIR" rev-parse HEAD)"
+printf '%s\n' "latest-requirement" > "$repo/requirements.txt"
+git -C "$repo" add requirements.txt
+git -C "$repo" commit -q -m "third update"
 if FAKE_ASTR_REQUIRE_ACTIVATED=1 FAKE_ASTR_PIP_FAIL=1 update_astr >/dev/null 2>/dev/null; then
     fail "update should fail when dependency install fails"
 fi
 [[ "$(git -C "$APP_DIR" rev-parse HEAD)" == "$update_head" ]] || fail "failed update should roll back git HEAD"
-grep -qx "new-requirement" "$APP_DIR/requirements.txt" || fail "failed update should restore previous code"
+grep -qx "newer-requirement" "$APP_DIR/requirements.txt" || fail "failed update should restore previous code"
+assert_venv_activates "$VENV_DIR"
 
 echo "ok - astr install update and patch preserve artifacts"

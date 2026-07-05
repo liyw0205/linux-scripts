@@ -104,14 +104,58 @@ install_requirements() {
     (
         # shellcheck disable=SC1090
         source "${activate_file}"
-        python -m pip install -U pip
-        python -m pip install -r "${requirements_file}"
+        "${python_bin}" -m pip install -U pip
+        "${python_bin}" -m pip install -r "${requirements_file}"
     )
+}
+
+venv_activation_target() {
+    local venv_dir="$1"
+    local activate_file="${venv_dir}/bin/activate"
+
+    [[ -f "${activate_file}" ]] || return 1
+    (
+        set +u
+        VIRTUAL_ENV=
+        # shellcheck disable=SC1090
+        source "${activate_file}" >/dev/null 2>&1
+        printf '%s\n' "${VIRTUAL_ENV:-}"
+    )
+}
+
+venv_is_usable() {
+    local venv_dir="$1"
+    local target
+
+    [[ -x "${venv_dir}/bin/python" && -x "${venv_dir}/bin/pip" && -f "${venv_dir}/bin/activate" ]] || return 1
+    target="$(venv_activation_target "${venv_dir}")" || return 1
+    [[ "${target}" == "${venv_dir}" ]]
+}
+
+build_venv_at_path() {
+    local venv_dir="$1"
+    local requirements_file="$2"
+
+    if [[ -e "${venv_dir}" && ! -d "${venv_dir}" ]]; then
+        echo "虚拟环境路径已存在且不是目录: ${venv_dir}" >&2
+        return 1
+    fi
+    if [[ -d "${venv_dir}" && -n "$(ls -A "${venv_dir}" 2>/dev/null || true)" ]]; then
+        echo "虚拟环境目录已存在但不可用，拒绝覆盖: ${venv_dir}" >&2
+        return 1
+    fi
+
+    rmdir "${venv_dir}" 2>/dev/null || true
+    # venv 激活脚本会写入绝对 VIRTUAL_ENV，不能在临时目录创建后再 mv。
+    if ! python3 -m venv "${venv_dir}" || ! install_requirements "${venv_dir}" "${requirements_file}"; then
+        rm -rf "${venv_dir}"
+        return 1
+    fi
 }
 
 install_astr() {
     local repo_url="${ASTR_REPO_URL:-https://github.com/AstrBotDevs/AstrBot.git}"
-    local base_dir app_name venv_parent venv_name tmp_app tmp_venv
+    local base_dir app_name venv_parent venv_name tmp_app backup_venv=""
 
     echo "开始安装 AstrBot..."
 
@@ -129,7 +173,7 @@ install_astr() {
     venv_name="$(basename "${VENV_DIR}")"
 
     if [[ -d "${APP_DIR}/.git" ]]; then
-        if [[ -x "${VENV_DIR}/bin/python" && -x "${VENV_DIR}/bin/pip" ]]; then
+        if venv_is_usable "${VENV_DIR}"; then
             echo "检测到已有 AstrBot 安装: ${APP_DIR}"
             echo "如需更新请执行: astr update"
             return 0
@@ -138,25 +182,23 @@ install_astr() {
             echo "未找到 ${APP_DIR}/requirements.txt" >&2
             return 1
         fi
-        if [[ -e "${VENV_DIR}" && ! -d "${VENV_DIR}" ]]; then
-            echo "虚拟环境路径已存在且不是目录: ${VENV_DIR}" >&2
-            return 1
-        fi
-        if [[ -d "${VENV_DIR}" && -n "$(ls -A "${VENV_DIR}" 2>/dev/null || true)" ]]; then
-            echo "虚拟环境目录已存在但不可用，拒绝覆盖: ${VENV_DIR}" >&2
-            return 1
-        fi
         mkdir -p "${venv_parent}"
-        tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || return 1
-        if ! python3 -m venv "${tmp_venv}" || ! install_requirements "${tmp_venv}" "${APP_DIR}/requirements.txt"; then
-            rm -rf "${tmp_venv}"
+        if [[ -d "${VENV_DIR}" && -n "$(ls -A "${VENV_DIR}" 2>/dev/null || true)" ]]; then
+            backup_venv="$(mktemp -d "${venv_parent}/.${venv_name}.backup.XXXXXX")" || return 1
+            rmdir "${backup_venv}"
+            if ! mv "${VENV_DIR}" "${backup_venv}"; then
+                rm -rf "${backup_venv}"
+                return 1
+            fi
+        fi
+        if ! build_venv_at_path "${VENV_DIR}" "${APP_DIR}/requirements.txt"; then
+            if [[ -n "${backup_venv}" ]]; then
+                rm -rf "${VENV_DIR}"
+                mv "${backup_venv}" "${VENV_DIR}" 2>/dev/null || true
+            fi
             return 1
         fi
-        rmdir "${VENV_DIR}" 2>/dev/null || true
-        if ! mv "${tmp_venv}" "${VENV_DIR}"; then
-            rm -rf "${tmp_venv}"
-            return 1
-        fi
+        [[ -n "${backup_venv}" ]] && rm -rf "${backup_venv}"
         echo "AstrBot 安装完成"
         echo "启动: astr start"
         return 0
@@ -183,33 +225,24 @@ install_astr() {
     app_name="$(basename "${APP_DIR}")"
     mkdir -p "${base_dir}" "${venv_parent}"
     tmp_app="$(mktemp -d "${base_dir}/.${app_name}.clone.XXXXXX")" || return 1
-    tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || {
-        rm -rf "${tmp_app}"
-        return 1
-    }
 
     if ! git clone "${repo_url}" "${tmp_app}"; then
-        rm -rf "${tmp_app}" "${tmp_venv}"
+        rm -rf "${tmp_app}"
         return 1
     fi
     if [[ ! -f "${tmp_app}/requirements.txt" ]]; then
         echo "未找到 ${tmp_app}/requirements.txt" >&2
-        rm -rf "${tmp_app}" "${tmp_venv}"
+        rm -rf "${tmp_app}"
         return 1
     fi
-    if ! python3 -m venv "${tmp_venv}" || ! install_requirements "${tmp_venv}" "${tmp_app}/requirements.txt"; then
-        rm -rf "${tmp_app}" "${tmp_venv}"
+    if ! build_venv_at_path "${VENV_DIR}" "${tmp_app}/requirements.txt"; then
+        rm -rf "${tmp_app}"
         return 1
     fi
 
     rmdir "${APP_DIR}" 2>/dev/null || true
-    rmdir "${VENV_DIR}" 2>/dev/null || true
     if ! mv "${tmp_app}" "${APP_DIR}"; then
-        rm -rf "${tmp_app}" "${tmp_venv}"
-        return 1
-    fi
-    if ! mv "${tmp_venv}" "${VENV_DIR}"; then
-        rm -rf "${APP_DIR}" "${tmp_venv}"
+        rm -rf "${tmp_app}" "${VENV_DIR}"
         return 1
     fi
 
@@ -218,13 +251,13 @@ install_astr() {
 }
 
 patch_astr() {
-    local old_head upstream new_head tmp_requirements tmp_venv venv_parent venv_name backup_venv=""
+    local old_head upstream new_head tmp_requirements venv_parent venv_name backup_venv=""
 
     if [[ ! -d "${APP_DIR}/.git" ]]; then
         echo "未找到 Git 仓库: ${APP_DIR}，请先执行 astr install" >&2
         return 1
     fi
-    if [[ ! -x "${VENV_DIR}/bin/python" || ! -x "${VENV_DIR}/bin/pip" ]]; then
+    if ! venv_is_usable "${VENV_DIR}"; then
         echo "未找到虚拟环境: ${VENV_DIR}，请先执行 astr install" >&2
         return 1
     fi
@@ -257,48 +290,38 @@ patch_astr() {
     venv_name="$(basename "${VENV_DIR}")"
     mkdir -p "${venv_parent}"
     tmp_requirements="$(mktemp "${venv_parent}/.${venv_name}.requirements.XXXXXX")" || return 1
-    tmp_venv="$(mktemp -d "${venv_parent}/.${venv_name}.venv.XXXXXX")" || {
+
+    if ! git -C "${APP_DIR}" show "${new_head}:requirements.txt" > "${tmp_requirements}"; then
+        rm -f "${tmp_requirements}"
+        return 1
+    fi
+
+    backup_venv="$(mktemp -d "${venv_parent}/.${venv_name}.backup.XXXXXX")" || {
         rm -f "${tmp_requirements}"
         return 1
     }
-
-    if ! git -C "${APP_DIR}" show "${new_head}:requirements.txt" > "${tmp_requirements}" ||
-        ! python3 -m venv "${tmp_venv}" ||
-        ! install_requirements "${tmp_venv}" "${tmp_requirements}"; then
-        rm -rf "${tmp_venv}"
+    rmdir "${backup_venv}"
+    if ! mv "${VENV_DIR}" "${backup_venv}"; then
+        rm -rf "${backup_venv}"
+        rm -f "${tmp_requirements}"
+        return 1
+    fi
+    if ! build_venv_at_path "${VENV_DIR}" "${tmp_requirements}"; then
+        rm -rf "${VENV_DIR}"
+        mv "${backup_venv}" "${VENV_DIR}" 2>/dev/null || true
         rm -f "${tmp_requirements}"
         return 1
     fi
     rm -f "${tmp_requirements}"
 
     if ! git -C "${APP_DIR}" merge --ff-only "${new_head}"; then
-        rm -rf "${tmp_venv}"
+        rm -rf "${VENV_DIR}"
+        mv "${backup_venv}" "${VENV_DIR}" 2>/dev/null || true
         git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
         return 1
     fi
 
-    if [[ -e "${VENV_DIR}" ]]; then
-        backup_venv="$(mktemp -d "${venv_parent}/.${venv_name}.backup.XXXXXX")" || {
-            rm -rf "${tmp_venv}"
-            git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
-            return 1
-        }
-        rmdir "${backup_venv}"
-        if ! mv "${VENV_DIR}" "${backup_venv}"; then
-            rm -rf "${tmp_venv}" "${backup_venv}"
-            git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
-            return 1
-        fi
-    fi
-    if ! mv "${tmp_venv}" "${VENV_DIR}"; then
-        rm -rf "${tmp_venv}"
-        if [[ -n "${backup_venv}" ]]; then
-            mv "${backup_venv}" "${VENV_DIR}" 2>/dev/null || true
-        fi
-        git -C "${APP_DIR}" reset --hard "${old_head}" >/dev/null 2>&1 || true
-        return 1
-    fi
-    [[ -n "${backup_venv}" ]] && rm -rf "${backup_venv}"
+    rm -rf "${backup_venv}"
     echo "AstrBot patch 完成"
 }
 
@@ -309,7 +332,7 @@ update_astr() {
         echo "未找到 Git 仓库: ${APP_DIR}，请先执行 astr install" >&2
         return 1
     fi
-    if [[ ! -x "${VENV_DIR}/bin/python" || ! -f "${VENV_DIR}/bin/activate" ]]; then
+    if ! venv_is_usable "${VENV_DIR}"; then
         echo "未找到虚拟环境: ${VENV_DIR}，请先执行 astr install" >&2
         return 1
     fi
