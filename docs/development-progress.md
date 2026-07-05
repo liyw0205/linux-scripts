@@ -122,15 +122,59 @@
 - 未执行真实 WebDAV remote 配置、rclone mount、cloudflared 登录、Tunnel 创建或 systemd 启停。
 - `cf.sh` 仍保留代理镜像下载列表；后续可考虑允许关闭镜像代理或固定可信下载源。
 
-## 阶段 4 预期
+## 阶段 4：剩余可靠性和临时文件修复
 
-继续处理剩余 P1/P2 可靠性和安全问题：
+日期：2026-07-05
 
+### 已完成
+
+- 使用主代理 + 2 个子代理完成 `webdav_copyto_relay.sh` 和 `mihomo.sh` 剩余风险审查。
 - `webdav_copyto_relay.sh`
-  - 停止任务时确保终止正在运行的 `rclone copyto` 子进程。
-  - 远端大小判断改用结构化字节输出，避免解析人类可读文本。
-- `cf.sh`
-  - 进一步收敛临时文件和配置写入失败时的回滚行为。
+  - 新增当前 `rclone copyto` 子进程 PID 记录。
+  - `stop` 和任务 `INT/TERM` trap 会先终止正在运行的 `rclone copyto`，再停止后台 worker。
+  - PID 文件读取增加正整数校验，任务 PID 清理改为匹配当前 worker 后再删除，降低重启竞态风险。
+  - 统计状态文件改为同目录临时文件 + `mv` 原子替换。
+  - 远端大小判断改为优先读取 `rclone size --json` 的 `bytes`，并回退到 `rclone lsjson --stat` 的 `Size`，避免解析人类可读大小。
+  - `status` 对数值字段增加兜底，避免损坏或半写入状态导致算术错误。
+  - 后台启动关闭 stdin，并将 stderr 追加到日志。
 - `mihomo.sh`
-  - 用 `mktemp` 替换固定 `/tmp` 文件路径。
-  - 端口修改和 YAML 写入继续减少 grep/sed 误伤。
+  - 固定 `/tmp/mihomo.gz`、`/tmp/metacubexd.tgz`、`/tmp/zashboard.zip`、`/tmp/mihomo_test.log` 改为 `mktemp` 私有临时路径。
+  - 订阅导入不再写入固定 `$SUB_FILE.tmp`，改为同目录 `mktemp` 文件验证后替换。
+  - 新增顶层 YAML scalar 读取/写入 helper，`secret`、`external-controller`、`port`、`socks-port` 修改统一走同一路径。
+  - SOCKS5 自动块删除改为精确 marker 处理，缺失 END marker 时保留原内容，避免误删到 EOF。
+  - SOCKS5 块插入和 listeners 检测收敛到顶层 `rules:` / `listeners:`，降低嵌套 key 误判。
+
+### 验证结果
+
+- `bash -n webdav_copyto_relay.sh` 通过。
+- `bash -n mihomo.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+- 静态检查确认 `mihomo.sh` 不再包含以下固定临时路径或文件：
+  - `/tmp/mihomo`
+  - `/tmp/metacubexd`
+  - `/tmp/zashboard`
+  - `/tmp/mihomo_test`
+  - `SUB_FILE.tmp`
+- 无副作用临时 copy 测试通过：
+  - `mihomo.sh` 的 `change_http_port`、`change_socks_port`、`change_controller_port` 会正确更新顶层 key。
+  - fake `rclone` 同大小远端文件走 skip，不触发 `copyto`。
+  - fake `rclone copyto` 睡眠任务被 `stop` 正确终止，`task.pid` 和 `rclone.pid` 被清理。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck` 和 `shfmt`，可选 lint 被跳过。
+- 未执行真实 Mihomo 安装、配置测试、重启、rclone WebDAV 传输或外部网络下载。
+- `webdav_copyto_relay.sh` 的 JSON 字段解析仍保持无新增依赖实现；后续如允许引入成熟工具，可优先接入可选 `jq`。
+- `cf.sh` 配置写入失败回滚尚未处理，建议放入阶段 5。
+
+## 阶段 5 预期
+
+继续处理剩余可靠性和测试覆盖问题：
+
+- `cf.sh`
+  - 检查并修复配置写入失败时的回滚行为，避免留下半写入 yml/service。
+- `mihomo.sh`
+  - 评估引入可选 `yq` / `python` YAML 解析路径；成熟工具存在时优先复用，缺失时保留当前 awk fallback。
+- `webdav_copyto_relay.sh`
+  - 增加更完整的 fake `rclone` 回归测试脚本，后续可接入 `bats-core`。

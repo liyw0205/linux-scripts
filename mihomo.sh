@@ -225,8 +225,53 @@ get_config_value() {
     local key="$1"
 
     if [ -f "$CONFIG_FILE" ]; then
-        grep -E "^${key}:" "$CONFIG_FILE" | head -n1 | awk -F': ' '{print $2}' | tr -d '"'
+        awk -v key="$key" '
+            index($0, key ":") == 1 {
+                value = substr($0, length(key) + 2)
+                sub(/^[[:space:]]*/, "", value)
+                sub(/[[:space:]]*#.*$/, "", value)
+                sub(/[[:space:]]*$/, "", value)
+                if ((value ~ /^".*"$/) || (value ~ /^'\''.*'\''$/)) {
+                    value = substr(value, 2, length(value) - 2)
+                }
+                print value
+                exit
+            }
+        ' "$CONFIG_FILE"
     fi
+}
+
+set_config_value() {
+    local key="$1"
+    local value="$2"
+    local tmp_file
+
+    mkdir -p "$(dirname "$CONFIG_FILE")"
+    tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+
+    if [ -f "$CONFIG_FILE" ]; then
+        awk -v key="$key" -v value="$value" '
+            BEGIN { written = 0 }
+            index($0, key ":") == 1 {
+                if (written == 0) {
+                    print key ": " value
+                    written = 1
+                }
+                next
+            }
+            { print }
+            END {
+                if (written == 0) {
+                    print key ": " value
+                }
+            }
+        ' "$CONFIG_FILE" > "$tmp_file"
+    else
+        printf '%s: %s\n' "$key" "$value" > "$tmp_file"
+    fi
+
+    mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 generate_controller_secret() {
@@ -265,12 +310,7 @@ ensure_controller_secret() {
         exit 1
     }
 
-    if grep -qE '^secret:' "$CONFIG_FILE"; then
-        sed -i -E "s#^secret:.*#secret: ${secret}#g" "$CONFIG_FILE"
-    else
-        echo "secret: ${secret}" >> "$CONFIG_FILE"
-    fi
-    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+    set_config_value "secret" "$secret"
     echo "$secret"
 }
 
@@ -431,8 +471,35 @@ repair_mmdb() {
 
 remove_socks5_group_blocks() {
     if [ -f "$CONFIG_FILE" ]; then
-        sed -i '/MIHOMO SOCKS5 GROUPS BEGIN/,/MIHOMO SOCKS5 GROUPS END/d' "$CONFIG_FILE"
-        sed -i '/MIHOMO SOCKS5 LISTENERS BEGIN/,/MIHOMO SOCKS5 LISTENERS END/d' "$CONFIG_FILE"
+        local tmp_file
+        tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
+        awk '
+            function flush_buffer() {
+                for (i = 1; i <= buffered; i++) print buffer[i]
+                buffered = 0
+            }
+            /# MIHOMO SOCKS5 (GROUPS|LISTENERS) BEGIN/ {
+                in_block = 1
+                buffered = 1
+                buffer[buffered] = $0
+                next
+            }
+            in_block {
+                buffered++
+                buffer[buffered] = $0
+                if ($0 ~ /# MIHOMO SOCKS5 (GROUPS|LISTENERS) END/) {
+                    in_block = 0
+                    buffered = 0
+                }
+                next
+            }
+            { print }
+            END {
+                if (in_block) flush_buffer()
+            }
+        ' "$CONFIG_FILE" > "$tmp_file"
+        mv "$tmp_file" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
     fi
 }
 
@@ -484,11 +551,11 @@ EOF
 insert_blocks_before_rules() {
     local block_file="$1"
     local tmp_file
-    tmp_file="$(mktemp)"
+    tmp_file="$(mktemp "$(dirname "$CONFIG_FILE")/.config.yaml.XXXXXX")"
 
     awk -v block="$(cat "$block_file")" '
         BEGIN { inserted = 0 }
-        /^[[:space:]]*rules:/ {
+        /^rules:/ {
             if (inserted == 0) { print block; inserted = 1 }
         }
         { print }
@@ -501,6 +568,7 @@ insert_blocks_before_rules() {
     ' "$CONFIG_FILE" > "$tmp_file"
 
     mv "$tmp_file" "$CONFIG_FILE"
+    chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 }
 
 enable_socks5_group() {
@@ -539,7 +607,7 @@ enable_socks5_group() {
     backup_file "$CONFIG_FILE"
     remove_socks5_group_blocks
 
-    if grep -qE '^[[:space:]]*listeners:' "$CONFIG_FILE"; then
+    if grep -qE '^listeners:' "$CONFIG_FILE"; then
         log_error "检测到 config.yaml 中已存在 listeners 配置"
         log_info "为了避免破坏你已有的配置，脚本暂停自动写入。"
         log_info "请先手动处理 listeners 后再启用 SOCKS5 多端口组。"
@@ -547,7 +615,7 @@ enable_socks5_group() {
     fi
 
     local block_file
-    block_file="$(mktemp)"
+    block_file="$(mktemp "$(dirname "$CONFIG_FILE")/.socks5-block.XXXXXX")"
     generate_socks5_blocks "$count" "$base_port" "$block_file"
     insert_blocks_before_rules "$block_file"
     rm -f "$block_file"
@@ -814,14 +882,23 @@ download_and_install_core() {
     local arch_file
     arch_file="$(detect_arch_file)"
     local url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/${arch_file}"
+    local tmp_dir tmp_file
 
     log_info "Mihomo 版本：$MIHOMO_VERSION"
     log_info "核心文件：$arch_file"
 
-    download_file "$url" "/tmp/mihomo.gz" "Mihomo 核心"
-    gunzip -c "/tmp/mihomo.gz" > "$MIHOMO_BIN"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mihomo.XXXXXX")"
+    tmp_file="${tmp_dir}/mihomo.gz"
+    if ! download_file "$url" "$tmp_file" "Mihomo 核心"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    gunzip -c "$tmp_file" > "$MIHOMO_BIN" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
     chmod +x "$MIHOMO_BIN"
-    rm -f "/tmp/mihomo.gz"
+    rm -rf "$tmp_dir"
 
     log_success "Mihomo 核心已安装：$MIHOMO_BIN"
 }
@@ -851,12 +928,21 @@ EOF
 
 install_metacubexd() {
     log_info "安装 MetaCubeXD 前端..."
+    local tmp_dir tmp_file
     mkdir -p "$MIHOMO_DIR"
     rm -rf "$UI_DIR"
     mkdir -p "$UI_DIR"
-    download_file "$METACUBEXD_DOWNLOAD_URL" "/tmp/metacubexd.tgz" "MetaCubeXD"
-    tar -xzf "/tmp/metacubexd.tgz" -C "$UI_DIR"
-    rm -f "/tmp/metacubexd.tgz"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-ui.XXXXXX")"
+    tmp_file="${tmp_dir}/metacubexd.tgz"
+    if ! download_file "$METACUBEXD_DOWNLOAD_URL" "$tmp_file" "MetaCubeXD"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    tar -xzf "$tmp_file" -C "$UI_DIR" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    rm -rf "$tmp_dir"
     echo "metacubexd" > "$UI_DIR/.frontend_info"
     echo "MetaCubeXD ${METACUBEXD_VERSION}" > "$UI_DIR/.frontend_version"
     log_success "MetaCubeXD 安装完成"
@@ -864,12 +950,21 @@ install_metacubexd() {
 
 install_zashboard() {
     log_info "安装 Zashboard 前端..."
+    local tmp_dir tmp_file
     mkdir -p "$MIHOMO_DIR"
     rm -rf "$UI_DIR"
     mkdir -p "$UI_DIR"
-    download_file "$ZASHBOARD_DOWNLOAD_URL" "/tmp/zashboard.zip" "Zashboard"
-    unzip -q "/tmp/zashboard.zip" -d "$UI_DIR"
-    rm -f "/tmp/zashboard.zip"
+    tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/mihomo-ui.XXXXXX")"
+    tmp_file="${tmp_dir}/zashboard.zip"
+    if ! download_file "$ZASHBOARD_DOWNLOAD_URL" "$tmp_file" "Zashboard"; then
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    unzip -q "$tmp_file" -d "$UI_DIR" || {
+        rm -rf "$tmp_dir"
+        return 1
+    }
+    rm -rf "$tmp_dir"
     echo "zashboard" > "$UI_DIR/.frontend_info"
     echo "Zashboard ${ZASHBOARD_VERSION}" > "$UI_DIR/.frontend_version"
     log_success "Zashboard 安装完成"
@@ -917,6 +1012,7 @@ import_subscription() {
     mkdir -p "$MIHOMO_DIR"
 
     local url="${1:-}"
+    local tmp_sub
     if [ -z "$url" ]; then
         read -r -p "请输入订阅链接：" url
     fi
@@ -929,27 +1025,28 @@ import_subscription() {
     log_info "开始下载订阅..."
     backup_file "$SUB_FILE"
 
-    if ! curl -fL --connect-timeout 10 --max-time 120 -A "Clash Verge" -H "User-Agent: Clash Verge" -o "$SUB_FILE.tmp" "$url"; then
+    tmp_sub="$(mktemp "$MIHOMO_DIR/subscription.XXXXXX")"
+    if ! curl -fL --connect-timeout 10 --max-time 120 -A "Clash Verge" -H "User-Agent: Clash Verge" -o "$tmp_sub" "$url"; then
         log_error "订阅下载失败"
-        rm -f "$SUB_FILE.tmp"
+        rm -f "$tmp_sub"
         exit 1
     fi
 
     local size
-    size="$(stat -c%s "$SUB_FILE.tmp" 2>/dev/null || echo 0)"
+    size="$(stat -c%s "$tmp_sub" 2>/dev/null || echo 0)"
     if [ "$size" -lt 20 ]; then
         log_error "订阅文件过小，可能无效"
-        rm -f "$SUB_FILE.tmp"
+        rm -f "$tmp_sub"
         exit 1
     fi
 
-    if grep -qiE "<html|<!doctype html" "$SUB_FILE.tmp"; then
+    if grep -qiE "<html|<!doctype html" "$tmp_sub"; then
         log_error "下载到的是网页，不是订阅 YAML"
-        rm -f "$SUB_FILE.tmp"
+        rm -f "$tmp_sub"
         exit 1
     fi
 
-    mv "$SUB_FILE.tmp" "$SUB_FILE"
+    mv "$tmp_sub" "$SUB_FILE"
     log_success "订阅已保存：$SUB_FILE"
 
     create_subscription_config
@@ -990,11 +1087,7 @@ change_controller_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^external-controller:' "$CONFIG_FILE"; then
-        sed -i -E "s#^external-controller:.*#external-controller: ${controller}#g" "$CONFIG_FILE"
-    else
-        echo "external-controller: ${controller}" >> "$CONFIG_FILE"
-    fi
+    set_config_value "external-controller" "$controller"
     ensure_controller_secret >/dev/null
 
     log_success "external-controller 已修改为：$controller"
@@ -1019,11 +1112,7 @@ change_http_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^port:' "$CONFIG_FILE"; then
-        sed -i -E "s#^port:.*#port: ${port}#g" "$CONFIG_FILE"
-    else
-        sed -i "1i port: ${port}" "$CONFIG_FILE"
-    fi
+    set_config_value "port" "$port"
 
     log_success "HTTP 代理端口 port 已修改为：$port"
     test_and_restart
@@ -1047,11 +1136,7 @@ change_socks_port() {
     ensure_config_exists
     backup_file "$CONFIG_FILE"
 
-    if grep -qE '^socks-port:' "$CONFIG_FILE"; then
-        sed -i -E "s#^socks-port:.*#socks-port: ${port}#g" "$CONFIG_FILE"
-    else
-        sed -i "/^port:/a socks-port: ${port}" "$CONFIG_FILE"
-    fi
+    set_config_value "socks-port" "$port"
 
     log_success "SOCKS5 代理端口 socks-port 已修改为：$port"
     test_and_restart
@@ -1063,15 +1148,19 @@ change_socks_port() {
 # =========================
 
 test_and_restart() {
+    local tmp_log
     ensure_controller_secret >/dev/null
     download_country_mmdb
     if [ -x "$MIHOMO_BIN" ]; then
         log_info "测试 Mihomo 配置..."
-        if "$MIHOMO_BIN" -t -d "$MIHOMO_DIR" >/tmp/mihomo_test.log 2>&1; then
+        tmp_log="$(mktemp "${TMPDIR:-/tmp}/mihomo-test.XXXXXX")"
+        if "$MIHOMO_BIN" -t -d "$MIHOMO_DIR" >"$tmp_log" 2>&1; then
+            rm -f "$tmp_log"
             log_success "配置测试通过"
         else
             log_error "配置测试失败："
-            cat /tmp/mihomo_test.log
+            cat "$tmp_log"
+            rm -f "$tmp_log"
             exit 1
         fi
     else

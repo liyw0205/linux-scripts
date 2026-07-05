@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-$SCRIPT_DIR/webdav_copyto_relay.conf}"
 STATE_DIR="${STATE_DIR:-$SCRIPT_DIR/.webdav_copyto_relay}"
 PID_FILE="$STATE_DIR/task.pid"
+RCLONE_PID_FILE="$STATE_DIR/rclone.pid"
 LOG_FILE="$STATE_DIR/relay.log"
 STATS_FILE="$STATE_DIR/stats.env"
 LIST_FILE="$STATE_DIR/file_list.txt"
@@ -76,7 +77,45 @@ run_root() {
 
 is_pid_alive() {
   local pid="${1:-}"
-  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]] && kill -0 "$pid" 2>/dev/null
+}
+
+read_pid_file() {
+  local file="$1" pid=""
+  [[ -f "$file" ]] || return 1
+  pid="$(cat "$file" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 0 ]] || return 1
+  echo "$pid"
+}
+
+current_worker_pid() {
+  echo "${BASHPID:-$$}"
+}
+
+remove_pid_file_if_matches() {
+  local file="$1" expected="$2" actual=""
+  actual="$(read_pid_file "$file" 2>/dev/null || true)"
+  if [[ -n "$actual" && "$actual" == "$expected" ]]; then
+    rm -f "$file" 2>/dev/null || true
+  fi
+}
+
+stop_pid() {
+  local pid="${1:-}" label="${2:-进程}"
+  [[ -n "$pid" ]] || return 0
+  is_pid_alive "$pid" || return 0
+
+  warn "停止${label}: PID=$pid"
+  kill "$pid" 2>/dev/null || true
+  sleep 1
+  is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+}
+
+stop_current_rclone() {
+  local rclone_pid=""
+  rclone_pid="$(read_pid_file "$RCLONE_PID_FILE" 2>/dev/null || true)"
+  stop_pid "$rclone_pid" "当前 rclone 传输"
+  rm -f "$RCLONE_PID_FILE" 2>/dev/null || true
 }
 
 format_kb_gb_mb() {
@@ -251,6 +290,8 @@ load_stats() {
 }
 
 save_stats() {
+  local tmp_file
+  tmp_file="$(mktemp "${STATE_DIR}/.stats.env.XXXXXX")"
   {
     write_state_kv TASK_STATUS "${TASK_STATUS:-not_started}"
     write_state_kv START_TIME "${START_TIME:-}"
@@ -263,7 +304,8 @@ save_stats() {
     write_state_kv OVERWRITE "${OVERWRITE:-0}"
     write_state_kv CURRENT_FILE "${CURRENT_FILE:-}"
     write_state_kv LAST_MESSAGE "${LAST_MESSAGE:-}"
-  } > "$STATS_FILE"
+  } > "$tmp_file"
+  mv "$tmp_file" "$STATS_FILE"
   chmod 600 "$STATS_FILE" 2>/dev/null || true
 }
 
@@ -394,9 +436,17 @@ remote_file_exists() {
 
 remote_file_size() {
   local remote_file="$1"
-  local out
-  out="$(rclone size "$remote_file" 2>/dev/null || true)"
-  awk -F': ' '/Total size/ {print $2}' <<<"$out" | awk '{print $1}' | head -n1
+  local out size
+
+  out="$(rclone size --json "$remote_file" 2>/dev/null || true)"
+  size="$(sed -n 's/.*"bytes"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$out" | head -n1)"
+  if [[ -n "${size:-}" ]]; then
+    echo "$size"
+    return 0
+  fi
+
+  out="$(rclone lsjson --stat "$remote_file" 2>/dev/null || true)"
+  sed -n 's/.*"Size"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$out" | head -n1
 }
 
 local_file_size() {
@@ -441,6 +491,20 @@ prepare_file_list() {
 # 单文件下载+上传
 ########################################
 
+RCLONE_CHILD_PID=""
+
+run_rclone_copyto() {
+  rclone copyto "$@" $(rclone_base_args) &
+  RCLONE_CHILD_PID="$!"
+  echo "$RCLONE_CHILD_PID" > "$RCLONE_PID_FILE"
+
+  local status=0
+  wait "$RCLONE_CHILD_PID" || status=$?
+  rm -f "$RCLONE_PID_FILE" 2>/dev/null || true
+  RCLONE_CHILD_PID=""
+  return "$status"
+}
+
 download_one() {
   local rel="$1"
   local src_remote="${REMOTE_NAME}:${SRC_PATH}/${rel}"
@@ -451,7 +515,7 @@ download_one() {
   run_root mkdir -p "$local_dir"
 
   info "下载远端文件 -> 本地临时: $rel"
-  rclone copyto "$src_remote" "$local_tmp" $(rclone_base_args)
+  run_rclone_copyto "$src_remote" "$local_tmp"
 }
 
 upload_one() {
@@ -460,7 +524,7 @@ upload_one() {
   local dst_remote="${REMOTE_NAME}:${DST_PATH}/${rel}"
 
   info "上传本地临时 -> 目标远端: $rel"
-  rclone copyto "$local_tmp" "$dst_remote" $(rclone_base_args)
+  run_rclone_copyto "$local_tmp" "$dst_remote"
 }
 
 cleanup_local_file() {
@@ -513,13 +577,15 @@ run_job() {
   local overwrite_this=0
 
   trap '
+    stop_current_rclone
     load_stats
     TASK_STATUS="stopped"
     END_TIME="$(date "+%F %T")"
     LAST_MESSAGE="任务已停止"
     CURRENT_FILE=""
     save_stats
-    rm -f "'"$PID_FILE"'" 2>/dev/null || true
+    remove_pid_file_if_matches "'"$PID_FILE"'" "$(current_worker_pid)"
+    rm -f "'"$RCLONE_PID_FILE"'" 2>/dev/null || true
     exit 1
   ' INT TERM
 
@@ -655,7 +721,8 @@ run_job() {
   OVERWRITE="$overwrite"
   save_stats
 
-  rm -f "$PID_FILE" 2>/dev/null || true
+  remove_pid_file_if_matches "$PID_FILE" "$(current_worker_pid)"
+  rm -f "$RCLONE_PID_FILE" 2>/dev/null || true
 }
 
 ########################################
@@ -684,7 +751,7 @@ start_cmd() {
 
   if [[ -f "$PID_FILE" ]]; then
     local oldpid
-    oldpid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    oldpid="$(read_pid_file "$PID_FILE" 2>/dev/null || true)"
     if is_pid_alive "$oldpid"; then
       die "任务已在运行中，PID=$oldpid"
     else
@@ -697,7 +764,7 @@ start_cmd() {
 
   (
     run_job
-  ) 2>&1 >/dev/null &
+  ) </dev/null >/dev/null 2>>"$LOG_FILE" &
   echo $! > "$PID_FILE"
   info "后台任务已启动，PID=$(cat "$PID_FILE")"
   info "日志文件: $LOG_FILE"
@@ -719,18 +786,18 @@ stop_cmd() {
   fi
 
   local pid
-  pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  pid="$(read_pid_file "$PID_FILE" 2>/dev/null || true)"
 
   if is_pid_alive "$pid"; then
     info "停止任务 PID=$pid"
-    kill "$pid" 2>/dev/null || true
-    sleep 1
-    is_pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+    stop_current_rclone
+    stop_pid "$pid" "后台任务"
   else
     warn "PID 文件存在，但进程已退出"
+    stop_current_rclone
   fi
 
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$RCLONE_PID_FILE"
 
   load_stats
   TASK_STATUS="stopped"
@@ -763,8 +830,15 @@ status_cmd() {
   local remaining="0"
 
   if [[ -f "$PID_FILE" ]]; then
-    pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+    pid="$(read_pid_file "$PID_FILE" 2>/dev/null || true)"
   fi
+
+  [[ "${TOTAL:-0}" =~ ^[0-9]+$ ]] || TOTAL="0"
+  [[ "${DONE:-0}" =~ ^[0-9]+$ ]] || DONE="0"
+  [[ "${SUCCESS:-0}" =~ ^[0-9]+$ ]] || SUCCESS="0"
+  [[ "${SKIP:-0}" =~ ^[0-9]+$ ]] || SKIP="0"
+  [[ "${FAIL:-0}" =~ ^[0-9]+$ ]] || FAIL="0"
+  [[ "${OVERWRITE:-0}" =~ ^[0-9]+$ ]] || OVERWRITE="0"
 
   if [[ "${TOTAL:-0}" -gt 0 ]]; then
     progress_percent="$(awk -v d="${DONE:-0}" -v t="${TOTAL:-0}" 'BEGIN { printf "%.2f", (d/t)*100 }')"
@@ -819,7 +893,7 @@ reconfig_cmd() {
 
 uninstall_cmd() {
   stop_cmd || true
-  rm -f "$CONFIG_FILE" "$PID_FILE" "$STATS_FILE" "$LIST_FILE"
+  rm -f "$CONFIG_FILE" "$PID_FILE" "$RCLONE_PID_FILE" "$STATS_FILE" "$LIST_FILE"
   warn "已删除配置和状态文件"
   warn "日志文件保留: $LOG_FILE"
   warn "临时目录保留: $TMP_DIR"
