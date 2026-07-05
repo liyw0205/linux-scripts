@@ -11,6 +11,8 @@ SERVICE_DIR="${SERVICE_DIR:-/etc/systemd/system}"
 SERVICE_FILE="${SERVICE_FILE:-${SERVICE_DIR}/${SERVICE_NAME}}"
 FUSE_DEVICE="${FUSE_DEVICE:-${FUSE_DEV:-/dev/fuse}}"
 FUSE_CONF="${FUSE_CONF:-/etc/fuse.conf}"
+FUSERMOUNT_BIN="${FUSERMOUNT_BIN:-}"
+FUSERMOUNT_FALLBACK_BIN="${FUSERMOUNT_FALLBACK_BIN:-/bin/fusermount}"
 
 # ========= 工具 =========
 info()  { echo -e "\033[1;32m[INFO]\033[0m $*"; }
@@ -79,34 +81,60 @@ detect_rclone_conf_path() {
 }
 
 detect_fusermount_bin() {
+  if [[ -n "${FUSERMOUNT_BIN:-}" ]]; then
+    [[ -x "$FUSERMOUNT_BIN" ]] || abort "找不到 fusermount3/fusermount: $FUSERMOUNT_BIN"
+    echo "$FUSERMOUNT_BIN"
+    return 0
+  fi
+
   if need_cmd fusermount3; then
     command -v fusermount3
   elif need_cmd fusermount; then
     command -v fusermount
-  elif [[ -x /bin/fusermount ]]; then
-    echo /bin/fusermount
+  elif [[ -x "$FUSERMOUNT_FALLBACK_BIN" ]]; then
+    echo "$FUSERMOUNT_FALLBACK_BIN"
   else
     abort "找不到 fusermount3/fusermount"
   fi
 }
 
+has_fusermount() {
+  if [[ -n "${FUSERMOUNT_BIN:-}" ]]; then
+    [[ -x "$FUSERMOUNT_BIN" ]]
+    return
+  fi
+
+  need_cmd fusermount3 || need_cmd fusermount || [[ -x "$FUSERMOUNT_FALLBACK_BIN" ]]
+}
+
 # ========= 安装 =========
 install_rclone() {
-  if need_cmd rclone; then
+  local packages=()
+
+  if ! need_cmd rclone; then
+    packages+=(rclone)
+  fi
+  if ! has_fusermount; then
+    packages+=(fuse3)
+  fi
+
+  if [[ "${#packages[@]}" -eq 0 ]]; then
     return 0
   fi
 
-  info "未检测到 rclone，开始安装..."
+  info "开始安装缺失依赖: ${packages[*]}"
   if need_cmd apt-get; then
     run_root apt-get update -y
-    run_root apt-get install -y rclone fuse3
+    run_root apt-get install -y "${packages[@]}"
   elif need_cmd dnf; then
-    run_root dnf install -y rclone fuse3
+    run_root dnf install -y "${packages[@]}"
   elif need_cmd yum; then
-    run_root yum install -y epel-release || true
-    run_root yum install -y rclone fuse3
+    if printf '%s\n' "${packages[@]}" | grep -qx 'rclone'; then
+      run_root yum install -y epel-release || true
+    fi
+    run_root yum install -y "${packages[@]}"
   elif need_cmd pacman; then
-    run_root pacman -Sy --noconfirm rclone fuse3
+    run_root pacman -Sy --noconfirm "${packages[@]}"
   else
     abort "不支持的包管理器，请手动安装 rclone + fuse3"
   fi

@@ -6,16 +6,16 @@
 
 set -euo pipefail
 
-APP_DIR="/root/AstrBot"
-VENV_DIR="/root/myenv"
-APP_PID_FILE="${APP_DIR}/astr.pid"
-SUPERVISOR_PID_FILE="${APP_DIR}/astr-supervisor.pid"
-STOP_FILE="${APP_DIR}/astr.stop"
-LOG_FILE="${APP_DIR}/astr.log"
+APP_DIR="${ASTR_APP_DIR:-/root/AstrBot}"
+VENV_DIR="${ASTR_VENV_DIR:-/root/myenv}"
+APP_PID_FILE="${ASTR_APP_PID_FILE:-${APP_DIR}/astr.pid}"
+SUPERVISOR_PID_FILE="${ASTR_SUPERVISOR_PID_FILE:-${APP_DIR}/astr-supervisor.pid}"
+STOP_FILE="${ASTR_STOP_FILE:-${APP_DIR}/astr.stop}"
+LOG_FILE="${ASTR_LOG_FILE:-${APP_DIR}/astr.log}"
 LOG_MAX_SIZE_MB="${ASTR_LOG_MAX_SIZE_MB:-50}"
-PYTHON="${VENV_DIR}/bin/python"
-RESTART_DELAY=3
-SELF="${BASH_SOURCE[0]}"
+PYTHON="${ASTR_PYTHON:-${VENV_DIR}/bin/python}"
+RESTART_DELAY="${ASTR_RESTART_DELAY:-3}"
+SELF="${ASTR_SELF:-${BASH_SOURCE[0]}}"
 SCREEN_SESSION="${ASTR_SCREEN_SESSION:-AstrBot}"
 
 usage() {
@@ -36,16 +36,22 @@ screen 会话名: ${SCREEN_SESSION}
 EOF
 }
 
+read_pid_file() {
+    local file="$1"
+    local pid
+
+    [[ -f "${file}" ]] || return 1
+    IFS= read -r pid < "${file}" || true
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "${pid}"
+}
+
 read_app_pid() {
-    if [[ -f "${APP_PID_FILE}" ]]; then
-        tr -cd '0-9' < "${APP_PID_FILE}"
-    fi
+    read_pid_file "${APP_PID_FILE}"
 }
 
 read_supervisor_pid() {
-    if [[ -f "${SUPERVISOR_PID_FILE}" ]]; then
-        tr -cd '0-9' < "${SUPERVISOR_PID_FILE}"
-    fi
+    read_pid_file "${SUPERVISOR_PID_FILE}"
 }
 
 is_running() {
@@ -192,6 +198,12 @@ wait_for_exit() {
     return 1
 }
 
+current_pgid() {
+    local pid="${1:-}"
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+    ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]' || true
+}
+
 require_screen() {
     if ! command -v screen >/dev/null 2>&1; then
         echo "screen not found, please install screen first" >&2
@@ -242,16 +254,26 @@ done
 
 terminate_process() {
     local pid="${1:-}"
+    local pgid
     if ! is_running "${pid}"; then
         return 0
     fi
 
-    kill -- "-${pid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+    pgid="$(current_pgid "${pid}" || true)"
+    if [[ -n "${pgid}" && "${pgid}" == "${pid}" ]]; then
+        kill -- "-${pgid}" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+    else
+        kill "${pid}" 2>/dev/null || true
+    fi
     if wait_for_exit "${pid}"; then
         return 0
     fi
 
-    kill -9 -- "-${pid}" 2>/dev/null || kill -9 "${pid}" 2>/dev/null || true
+    if [[ -n "${pgid}" && "${pgid}" == "${pid}" ]]; then
+        kill -9 -- "-${pgid}" 2>/dev/null || kill -9 "${pid}" 2>/dev/null || true
+    else
+        kill -9 "${pid}" 2>/dev/null || true
+    fi
     wait_for_exit "${pid}" || true
 }
 
@@ -438,48 +460,54 @@ show_log() {
     tail -n 200 -f "${LOG_FILE}"
 }
 
-if [[ $# -eq 0 ]]; then
-    usage
-    exit 0
-fi
-
-case "${1:-}" in
-    supervise)
-        supervise
-        ;;
-    start)
-        start
-        ;;
-    stop)
-        stop
-        ;;
-    restart)
-        restart
-        ;;
-    status)
-        status
-        ;;
-    log)
-        show_log
-        ;;
-    rotate-log)
-        rotate_log_if_needed
-        ;;
-    install)
-        install_astr
-        ;;
-    patch)
-        patch_astr
-        ;;
-    deploy|self-install)
-        deploy_astr
-        ;;
-    -h|--help|help)
+main() {
+    if [[ $# -eq 0 ]]; then
         usage
         exit 0
-        ;;
-    *)
-        usage
-        exit 1
-        ;;
-esac
+    fi
+
+    case "${1:-}" in
+        supervise)
+            supervise
+            ;;
+        start)
+            start
+            ;;
+        stop)
+            stop
+            ;;
+        restart)
+            restart
+            ;;
+        status)
+            status
+            ;;
+        log)
+            show_log
+            ;;
+        rotate-log)
+            rotate_log_if_needed
+            ;;
+        install)
+            install_astr
+            ;;
+        patch)
+            patch_astr
+            ;;
+        deploy|self-install)
+            deploy_astr
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage
+            exit 1
+            ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi

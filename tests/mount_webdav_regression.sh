@@ -126,6 +126,14 @@ EOF
 exit 0
 EOF
   chmod +x "$bin/fusermount3"
+
+  cat > "$bin/apt-get" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'apt-get|%s\n' "$*" >> "${FAKE_MOUNT_LOG:?}"
+exit 0
+EOF
+  chmod +x "$bin/apt-get"
 }
 
 TMP_DIR="$(mktemp -d)"
@@ -145,6 +153,8 @@ export REMOTE_NAME="webdav_remote"
 export RCLONE_BIN="$TMP_DIR/bin/rclone"
 export FUSE_DEVICE="$TMP_DIR/dev/fuse"
 export FUSE_CONF="$TMP_DIR/etc/fuse.conf"
+export FUSERMOUNT_BIN="$TMP_DIR/bin/fusermount3"
+export FUSERMOUNT_FALLBACK_BIN="$TMP_DIR/bin/missing-fusermount"
 touch "$FUSE_DEVICE"
 
 # shellcheck disable=SC1090
@@ -158,6 +168,13 @@ if declare -f check_fuse | grep -Eq '/dev/fuse|/etc/fuse.conf'; then
   fail "check_fuse should use overrideable fuse paths"
 fi
 
+: > "$TMP_DIR/calls.log"
+FUSERMOUNT_BIN="$TMP_DIR/bin/missing-fusermount" install_rclone >/dev/null
+grep -qx "apt-get|install -y fuse3" "$TMP_DIR/calls.log" || fail "existing rclone with missing fusermount should install fuse3"
+! grep -q "apt-get|install -y rclone" "$TMP_DIR/calls.log" || fail "existing rclone should not be reinstalled"
+FUSERMOUNT_BIN="$TMP_DIR/bin/fusermount3"
+
+: > "$TMP_DIR/calls.log"
 rm -f "$FUSE_DEVICE" "$FUSE_CONF"
 if (check_fuse) >/dev/null 2>/dev/null; then
   fail "check_fuse should fail when fuse device is missing"

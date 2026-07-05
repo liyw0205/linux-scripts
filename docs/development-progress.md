@@ -305,10 +305,59 @@
 - 未执行真实 aria2、systemd、rclone mount、WebDAV、cloudflared、Mihomo 重启或外部网络操作。
 - `mount_webdav.sh check_fuse` 已可测试，但真实系统上仍要求实际 `/dev/fuse` 和 `/etc/fuse.conf` 权限。
 
-## 阶段 8 预期
+## 阶段 8：文档一致性与剩余守护脚本可测试性
 
-继续收敛剩余脚本一致性和用户文档：
+日期：2026-07-05
 
-- 评估 `cf.sh`、`mihomo.sh`、`a2up.sh`、`mount_webdav.sh` 的 README 说明是否和当前安全默认值、测试能力一致。
-- 继续审查其他脚本的可测试性和高风险写入路径，优先补无副作用回归测试。
+### 已完成
+
+- 使用主代理 + 1 个子代理完成 README 与当前脚本行为一致性、剩余高风险写入路径和测试候选项审查。
+- `astr.sh`
+  - 默认路径、PID 文件、日志文件、Python 路径和重启间隔支持环境变量覆盖，便于临时目录无副作用测试。
+  - 新增 `BASH_SOURCE` 入口保护，source helper 不会执行主命令分发。
+  - PID 文件读取改为严格单行数字校验，避免 `tr -cd` 把污染内容拼成有效 PID。
+  - `terminate_process` 仅在目标 PID 本身是进程组长时才杀进程组，否则只杀目标 PID，降低误杀同号进程组风险。
+  - 新增 `tests/astr_state_regression.sh`，覆盖环境变量覆盖、PID 解析和日志截断。
+- `napcat.sh`
+  - 新增 `BASH_SOURCE` 入口保护，便于 source helper 做无副作用测试。
+  - 新增 `tests/napcat_state_regression.sh`，覆盖路径覆盖、QQ 状态文件、PID 解析和日志截断。
+- `mount_webdav.sh`
+  - 新增 `FUSERMOUNT_BIN` / `FUSERMOUNT_FALLBACK_BIN` 覆盖入口。
+  - `install_rclone` 改为分别检查 `rclone` 与 `fusermount` / `fuse3`，已有 rclone 但缺 FUSE 工具时会单独安装 `fuse3`。
+  - `tests/mount_webdav_regression.sh` 增加 fake `apt-get` 场景，验证已有 rclone 时只安装缺失的 `fuse3`，不会重复安装 rclone。
+- README
+  - 同步 `a2up.sh` RPC secret 迁移/修复策略和 `install` 自动部署快捷命令行为。
+  - 同步 `mount_webdav.sh install` 的 rclone 与 FUSE 工具检查行为。
+  - 明确 `webdav_copyto_relay.sh` 是复制远端文件、不删除远端源文件；并说明 `install` / `reconfig` / `start` 会重建同名 rclone remote。
+  - 补充 WebDAV relay 默认用户名/密码。
+  - 补充 Mihomo 默认 `allow-lan`、DNS 监听面和 SOCKS5 多端口组监听面的文档提示。
+- 测试工程化
+  - `scripts/test.sh` 接入新增 AstrBot / NapCat 状态 helper 回归测试。
+
+### 验证结果
+
+- `bash -n astr.sh` 通过。
+- `bash -n napcat.sh` 通过。
+- `bash tests/astr_state_regression.sh` 通过。
+- `bash tests/napcat_state_regression.sh` 通过。
+- `bash tests/mount_webdav_regression.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 systemd 启停、rclone mount/WebDAV 传输、cloudflared 远程操作、Mihomo 重启、AstrBot/NapCat 安装或 screen/Xvfb/QQ 启动。
+- `webdav_copyto_relay.sh start` 仍会重建同名 rclone remote；阶段 8 先文档显式化，后续可评估是否改为仅在 `install` / `reconfig` 重建。
+- `mihomo.sh` 的核心/前端下载仍可继续收敛为临时文件验证后原子替换。
+- `napcat.sh patch` 下载/编译失败时是否污染最终启动器产物仍缺少无副作用回归测试。
+
+## 阶段 9 预期
+
+继续收敛高风险写入路径：
+
+- 评估并测试 `webdav_copyto_relay.sh` 的 remote 重建时机，优先减少 `start` 的配置写入副作用。
+- 为 `mihomo.sh` 核心与前端安装补充无副作用回归测试，验证下载失败不破坏旧文件。
+- 为 `napcat.sh patch` 补充 fake `curl` / `g++` 回归测试，验证失败不污染既有 `libnapcat_launcher.so`。
 - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。
