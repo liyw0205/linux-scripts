@@ -215,10 +215,68 @@
 - `cf.sh create` 若远程 tunnel 创建成功但本地文件写入失败，目前只保证本地文件回滚，不自动删除远程 tunnel，避免引入新的远程失败路径。
 - `mihomo.sh` 的复杂 YAML block 仍由模板和 marker 文本逻辑管理；阶段 5 仅收敛顶层 scalar helper。
 
-## 阶段 6 预期
+## 阶段 6：命令级 fake 回归测试和脚本一致性
 
-继续处理测试覆盖和脚本一致性：
+日期：2026-07-05
 
-- 将 `cf.sh` 的 `set-url`、`repair`、`delete` 顺序调整沉淀为更完整的 fake cloudflared / fake systemctl 测试。
-- 评估为 `a2up.sh`、`mount_webdav.sh`、`cf.sh` 的关键配置写入路径增加同类无副作用回归测试。
-- 若后续环境允许安装成熟工具，接入 `shellcheck`、`shfmt`、`bats-core` 到本地开发说明和严格验证路径。
+### 已完成
+
+- 使用主代理 + 3 个子代理完成 `cf.sh`、`a2up.sh`、`mount_webdav.sh` 的测试候选路径审查。
+- `cf.sh`
+  - `SERVICE_DIR` 支持环境变量覆盖，便于 fake systemd 目录测试。
+  - `set-url` 和 `repair` 改为纯本地配置命令，不再先要求 `cloudflared --version`。
+  - `repair` 修复旧格式 `- service: URL` 解析错误，改为读取 `service:` 后的完整值。
+  - 新增 fake `cloudflared` / fake `systemctl` 命令级回归测试，覆盖：
+    - `set-url` 安全 quote URL，且不调用 cloudflared/systemctl。
+    - `repair` 从旧 ingress service 格式恢复 URL，且不调用 cloudflared/systemctl。
+    - `delete` 远端删除失败时保留 yml/service/credentials。
+    - `delete` 远端删除成功后才删除本地 yml/service/credentials，并执行 daemon-reload。
+- `a2up.sh`
+  - 增加 `BASH_SOURCE` 入口保护，便于 source helper 做无副作用测试。
+  - 新增配置和 service 回归测试，覆盖：
+    - `write_conf` 默认写出 `rpc-listen-all=false` 和非空 `rpc-secret`。
+    - `ensure_rpc_secret` 会复用已有安全 secret。
+    - `write_secret_env` 写出同一 secret 且权限为 `600`。
+    - 主 aria2 service 不内联 `ARIA2_RPC_SECRET`，扫描 service 使用 `EnvironmentFile`。
+    - `doctor` 能识别本机 RPC、安全 secret、secret env 文件，以及 `rpc-listen-all=true` / env 缺失异常。
+- `mount_webdav.sh`
+  - `SERVICE_DIR` / `SERVICE_FILE` 支持环境变量覆盖。
+  - 增加 `BASH_SOURCE` 入口保护，便于 source helper 做无副作用测试。
+  - 新增 fake rclone / fake systemctl 回归测试，覆盖：
+    - `detect_rclone_conf_path` 使用 `SUDO_USER` 的 rclone 配置路径，并覆盖 rclone config file 空输出 fallback。
+    - `config_remote` 使用同一个用户配置路径执行 delete/create/lsd，默认 vendor 为 `other`，密码走 `rclone obscure`。
+    - `write_service` 写出正确 `User`、`Group`、`HOME`、`--config`、cache dir 和 `fusermount3` 路径。
+    - remote 缺失时不写 service，也不执行 daemon-reload。
+- 测试工程化
+  - `scripts/test.sh` 接入新增：
+    - `tests/cf_command_regression.sh`
+    - `tests/a2up_config_service_regression.sh`
+    - `tests/mount_webdav_regression.sh`
+  - 修复 `webdav_copyto_relay` skip 回归测试的 PID 清理等待竞态。
+
+### 验证结果
+
+- `bash -n cf.sh` 通过。
+- `bash -n a2up.sh` 通过。
+- `bash -n mount_webdav.sh` 通过。
+- `bash scripts/test.sh` 通过。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 被跳过，测试继续使用 Bash fallback。
+- 未执行真实 cloudflared、systemctl、aria2、rclone mount、WebDAV、Mihomo 重启或外部网络操作。
+- `a2up.sh ensure_conf_ready` 对“已有配置文件但缺失/不安全 rpc-secret”的场景仍只更新内存 secret，不自动重写配置；后续可评估是否需要迁移修复。
+- `mount_webdav.sh check_fuse` 仍直接检查 `/dev/fuse` 和 `/etc/fuse.conf`，尚未拆成可配置路径，因此本阶段未覆盖该写入路径。
+
+## 阶段 7 预期
+
+继续处理剩余一致性和可测试性：
+
+- `a2up.sh`
+  - 评估并修复已有配置缺失/不安全 `rpc-secret` 时是否应自动重写配置文件，避免内存/env secret 与配置文件不一致。
+- `mount_webdav.sh`
+  - 将 `check_fuse` 的 `/dev/fuse`、`/etc/fuse.conf` 拆成可覆盖变量，并增加无副作用测试。
+- 测试工具链
+  - 若环境允许，接入成熟工具 `shellcheck`、`shfmt`、`bats-core`；否则继续保持 optional/fallback 路径。

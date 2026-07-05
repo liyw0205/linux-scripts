@@ -7,7 +7,8 @@ REMOTE_NAME="${REMOTE_NAME:-webdav_remote}"
 MOUNT_DIR="${MOUNT_DIR:-/mnt/webdav}"
 CACHE_DIR="${CACHE_DIR:-/var/cache/rclone-webdav}"
 SERVICE_NAME="${SERVICE_NAME:-rclone-webdav.service}"
-SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
+SERVICE_DIR="${SERVICE_DIR:-/etc/systemd/system}"
+SERVICE_FILE="${SERVICE_FILE:-${SERVICE_DIR}/${SERVICE_NAME}}"
 
 # ========= 工具 =========
 info()  { echo -e "\033[1;32m[INFO]\033[0m $*"; }
@@ -325,4 +326,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

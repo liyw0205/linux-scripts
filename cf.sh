@@ -5,7 +5,7 @@ set -euo pipefail
 CLOUDFLARED_BIN="${CLOUDFLARED_BIN:-/usr/local/bin/cloudflared}"
 CLOUDFLARED_HOME="${CLOUDFLARED_HOME:-$HOME/.cloudflared}"
 SERVICE_PREFIX="cf-tunnel"
-SERVICE_DIR="/etc/systemd/system"
+SERVICE_DIR="${SERVICE_DIR:-/etc/systemd/system}"
 PATCH_TARGET="/usr/local/bin/cf"
 TMP_ROOT="${TMPDIR:-/tmp}"
 
@@ -732,7 +732,6 @@ set_url_cmd() {
     local name="${1:-}"
     local url="${2:-}"
     [[ -n "$name" && -n "$url" ]] || abort "用法: cf set-url <隧道名> <穿透地址>"
-    ensure_cloudflared
 
     local cfg="${CLOUDFLARED_HOME}/${name}.yml"
     [[ -f "$cfg" ]] || abort "配置文件不存在: $cfg"
@@ -751,7 +750,6 @@ set_url_cmd() {
 repair_cmd() {
     local name="${1:-}"
     [[ -n "$name" ]] || abort "用法: cf repair <隧道名>"
-    ensure_cloudflared
 
     local cfg="${CLOUDFLARED_HOME}/${name}.yml"
     [[ -f "$cfg" ]] || abort "配置文件不存在: $cfg"
@@ -764,7 +762,15 @@ repair_cmd() {
     local id cred url
     id="$(read_tunnel_id_from_yml "$cfg")"
     cred="$(read_credentials_from_yml "$cfg")"
-    url="$(awk '/service:/{print $2; exit}' "$cfg")"
+    url="$(awk '
+        index($0, "service:") {
+            value = substr($0, index($0, "service:") + length("service:"))
+            sub(/^[[:space:]]*/, "", value)
+            sub(/[[:space:]]*$/, "", value)
+            print value
+            exit
+        }
+    ' "$cfg")"
     [[ -z "$id" ]] && abort "无法识别 tunnel 字段，无法修复: $cfg"
     [[ -z "$cred" ]] && cred="${CLOUDFLARED_HOME}/${id}.json"
     [[ -z "$url" ]] && url="http://127.0.0.1:80"
@@ -943,8 +949,8 @@ main() {
         rename) ensure_cloudflared; rename_cmd "$@" ;;
         sync) ensure_cloudflared; sync_cmd "$@" ;;
         dns) ensure_cloudflared; dns_cmd "$@" ;;
-        set-url) ensure_cloudflared; set_url_cmd "$@" ;;
-        repair) ensure_cloudflared; repair_cmd "$@" ;;
+        set-url) set_url_cmd "$@" ;;
+        repair) repair_cmd "$@" ;;
         enable) ensure_cloudflared; enable_cmd "$@" ;;
         disable) ensure_cloudflared; disable_cmd "$@" ;;
         restart) ensure_cloudflared; restart_cmd "$@" ;;

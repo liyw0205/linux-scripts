@@ -13,4 +13,7 @@ else
 fi
 
 bash "$ROOT_DIR/tests/cf_local_writes_regression.sh"
+bash "$ROOT_DIR/tests/cf_command_regression.sh"
 bash "$ROOT_DIR/tests/mihomo_yaml_helpers_regression.sh"
+bash "$ROOT_DIR/tests/a2up_config_service_regression.sh"
+bash "$ROOT_DIR/tests/mount_webdav_regression.sh"

@@ -34,6 +34,16 @@ wait_for_stat() {
   return 1
 }
 
+wait_for_absent() {
+  local file="$1"
+  local tries="${2:-50}"
+  for ((i = 0; i < tries; i++)); do
+    [[ ! -e "$file" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 wait_pid_gone() {
   local pid="$1"
   local tries="${2:-50}"
@@ -98,7 +108,7 @@ test_skip() {
   grep -qx "SUCCESS=0" "$tmp/state/stats.env" || fail "success count mismatch"
   grep -qx "FAIL=0" "$tmp/state/stats.env" || fail "fail count mismatch"
   [[ ! -e "$tmp/copyto.started" ]] || fail "copyto should not run for same-size remote file"
-  [[ ! -e "$tmp/state/task.pid" ]] || fail "finished task pid should be cleaned"
+  wait_for_absent "$tmp/state/task.pid" || fail "finished task pid should be cleaned"
   cleanup_tmp "$tmp"
   CURRENT_TMP=""
   echo "ok - webdav skip same-size remote"

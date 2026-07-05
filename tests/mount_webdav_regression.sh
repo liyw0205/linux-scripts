@@ -1,0 +1,197 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP_DIR=""
+
+cleanup() {
+  [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
+fail() {
+  echo "[FAIL] $*" >&2
+  exit 1
+}
+
+write_fake_bins() {
+  local bin="$1"
+
+  cat > "$bin/id" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  "-un") echo root ;;
+  "-u") echo 0 ;;
+  "-u alice") echo 1001 ;;
+  "-gn alice") echo alicegrp ;;
+  *) /usr/bin/id "$@" ;;
+esac
+EOF
+  chmod +x "$bin/id"
+
+  cat > "$bin/getent" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "passwd" && "${2:-}" == "alice" ]]; then
+  printf 'alice:x:1001:1001::%s/home/alice:/bin/bash\n' "${FAKE_MOUNT_ROOT:?}"
+  exit 0
+fi
+exit 2
+EOF
+  chmod +x "$bin/getent"
+
+cat > "$bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sudo|%s\n' "$*" >> "${FAKE_MOUNT_LOG:?}"
+if [[ "${1:-}" == "-H" && "${2:-}" == "-u" ]]; then
+  shift 3
+fi
+cmd="${1:-}"
+[[ -n "$cmd" ]] || exit 0
+shift || true
+exec "$cmd" "$@"
+EOF
+  chmod +x "$bin/sudo"
+
+  cat > "$bin/rclone" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'rclone|%s\n' "$*" >> "${FAKE_MOUNT_LOG:?}"
+if [[ "${1:-}" == "config" && "${2:-}" == "file" ]]; then
+  if [[ "${FAKE_RCLONE_CONFIG_FILE_EMPTY:-0}" == "1" ]]; then
+    exit 0
+  fi
+  echo "Configuration file is stored at: ${FAKE_MOUNT_ROOT:?}/home/alice/.config/rclone/rclone.conf"
+  exit 0
+fi
+if [[ "${1:-}" == "--config" ]]; then
+  conf="$2"
+  shift 2
+  case "${1:-}" in
+    config)
+      case "${2:-}" in
+        delete) exit 0 ;;
+        create)
+          [[ "$conf" == "${FAKE_MOUNT_ROOT:?}/home/alice/.config/rclone/rclone.conf" ]] || exit 3
+          printf '%s\n' "$*" >> "${FAKE_MOUNT_ROOT:?}/rclone-create.args"
+          exit 0
+          ;;
+      esac
+      ;;
+    listremotes)
+      if [[ "${FAKE_REMOTE_MISSING:-0}" == "1" ]]; then
+        exit 0
+      fi
+      echo "webdav_remote:"
+      exit 0
+      ;;
+    lsd)
+      exit 0
+      ;;
+  esac
+fi
+if [[ "${1:-}" == "obscure" ]]; then
+  echo "obscured-pass"
+  exit 0
+fi
+if [[ "${1:-}" == "mount" ]]; then
+  echo "mount should not be called in regression tests" >&2
+  exit 1
+fi
+exit 0
+EOF
+  chmod +x "$bin/rclone"
+
+  cat > "$bin/systemctl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'systemctl|%s\n' "$*" >> "${FAKE_MOUNT_LOG:?}"
+case "${1:-}" in
+  daemon-reload|status|restart|stop|disable) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$bin/systemctl"
+
+  cat > "$bin/chown" <<'EOF'
+#!/usr/bin/env sh
+exit 0
+EOF
+  chmod +x "$bin/chown"
+
+  cat > "$bin/fusermount3" <<'EOF'
+#!/usr/bin/env sh
+exit 0
+EOF
+  chmod +x "$bin/fusermount3"
+}
+
+TMP_DIR="$(mktemp -d)"
+mkdir -p "$TMP_DIR/bin" "$TMP_DIR/home/alice/.config/rclone" "$TMP_DIR/systemd" "$TMP_DIR/mount" "$TMP_DIR/cache"
+: > "$TMP_DIR/calls.log"
+write_fake_bins "$TMP_DIR/bin"
+
+export PATH="$TMP_DIR/bin:$PATH"
+export FAKE_MOUNT_ROOT="$TMP_DIR"
+export FAKE_MOUNT_LOG="$TMP_DIR/calls.log"
+export SUDO_USER="alice"
+export SERVICE_DIR="$TMP_DIR/systemd"
+export SERVICE_NAME="rclone-webdav.service"
+export MOUNT_DIR="$TMP_DIR/mount"
+export CACHE_DIR="$TMP_DIR/cache"
+export REMOTE_NAME="webdav_remote"
+export RCLONE_BIN="$TMP_DIR/bin/rclone"
+
+# shellcheck disable=SC1090
+. "$ROOT_DIR/mount_webdav.sh"
+
+run_root() {
+  "$@"
+}
+
+conf_path="$(detect_rclone_conf_path alice)"
+[[ "$conf_path" == "$TMP_DIR/home/alice/.config/rclone/rclone.conf" ]] || fail "rclone config path should use sudo user"
+
+export FAKE_RCLONE_CONFIG_FILE_EMPTY=1
+conf_path="$(detect_rclone_conf_path alice)"
+[[ "$conf_path" == "$TMP_DIR/home/alice/.config/rclone/rclone.conf" ]] || fail "fallback config path should use sudo user's home"
+unset FAKE_RCLONE_CONFIG_FILE_EMPTY
+
+printf '%s\n%s\n%s\n%s\n' \
+  "http://127.0.0.1:5244/dav" \
+  "" \
+  "alice" \
+  "secret" | config_remote >/dev/null
+
+grep -q "rclone|--config $TMP_DIR/home/alice/.config/rclone/rclone.conf config create webdav_remote webdav" "$TMP_DIR/calls.log" || fail "config_remote should create remote with sudo user's config"
+grep -q "vendor=other" "$TMP_DIR/rclone-create.args" || fail "default vendor should be other"
+grep -q "pass=obscured-pass" "$TMP_DIR/rclone-create.args" || fail "password should be obscured"
+! grep -q "rclone|mount" "$TMP_DIR/calls.log" || fail "config_remote should not mount"
+! grep -q "systemctl|" "$TMP_DIR/calls.log" || fail "config_remote should not call systemctl"
+
+: > "$TMP_DIR/calls.log"
+write_service >/dev/null
+service_file="$TMP_DIR/systemd/rclone-webdav.service"
+[[ -s "$service_file" ]] || fail "service file should be written"
+grep -qx "User=alice" "$service_file" || fail "service user mismatch"
+grep -qx "Group=alicegrp" "$service_file" || fail "service group mismatch"
+grep -qx "Environment=HOME=$TMP_DIR/home/alice" "$service_file" || fail "service home mismatch"
+grep -q "ExecStart=$TMP_DIR/bin/rclone mount webdav_remote:/ $TMP_DIR/mount" "$service_file" || fail "service ExecStart mismatch"
+grep -q -- "--config=$TMP_DIR/home/alice/.config/rclone/rclone.conf" "$service_file" || fail "service config path mismatch"
+grep -q -- "--cache-dir=$TMP_DIR/cache" "$service_file" || fail "service cache path mismatch"
+grep -q "ExecStop=$TMP_DIR/bin/fusermount3 -uz $TMP_DIR/mount" "$service_file" || fail "service ExecStop mismatch"
+grep -qx "systemctl|daemon-reload" "$TMP_DIR/calls.log" || fail "write_service should daemon-reload"
+! grep -q "systemctl|enable" "$TMP_DIR/calls.log" || fail "write_service should not enable service"
+! grep -q "systemctl|restart" "$TMP_DIR/calls.log" || fail "write_service should not restart service"
+
+rm -f "$service_file"
+: > "$TMP_DIR/calls.log"
+if (FAKE_REMOTE_MISSING=1 write_service) >/dev/null 2>/dev/null; then
+  fail "write_service should fail when remote is missing"
+fi
+[[ ! -e "$service_file" ]] || fail "missing remote should not write service"
+! grep -q "systemctl|daemon-reload" "$TMP_DIR/calls.log" || fail "missing remote should not daemon-reload"
+
+echo "ok - mount_webdav user context and service generation"
