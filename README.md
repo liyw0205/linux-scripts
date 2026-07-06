@@ -1,6 +1,6 @@
 # linux-scripts
 
-自用 Linux 运维脚本集合，覆盖 aria2、rclone/WebDAV、cloudflared、Mihomo、AstrBot、NapCat，以及一个单文件 aria2 Web 管理页面。
+自用 Linux 运维脚本集合，覆盖 aria2、rclone/WebDAV、cloudflared、Mihomo、AstrBot、NapCat、New API、Sub2API，以及一个单文件 aria2 Web 管理页面。
 
 脚本以 Debian / Ubuntu 为主要使用环境，部分脚本兼容 dnf / yum / pacman。涉及服务管理的脚本通常依赖 `systemd`，并需要 `root` 或 `sudo` 权限。
 
@@ -16,6 +16,8 @@
 | `mihomo.sh` | Mihomo 一体化安装、订阅、面板、端口和服务管理 |
 | `astr.sh` | AstrBot 安装、更新、screen 守护和日志管理 |
 | `napcat.sh` | NapCat 安装、启动器补丁、QQ 号和 screen 守护管理 |
+| `newapi.sh` | New API Docker Compose 服务栈管理和数据备份更新 |
+| `sub2api.sh` | Sub2API Docker Compose 服务栈管理和数据库备份更新 |
 
 ## 通用约定
 
@@ -369,7 +371,7 @@ bash astr.sh start
 说明：
 
 - 新安装会先在临时目录完成 git clone、venv 创建和依赖安装，全部成功后再发布到最终目录。
-- `update` 会在应用目录执行 `git pull --ff-only`，然后进入现有虚拟环境刷新依赖；依赖安装失败时会回退本次代码更新。
+- `update` 会 `fetch` upstream 后将已跟踪文件重置到远端版本，保留不冲突的未跟踪文件，然后进入现有虚拟环境刷新依赖；依赖安装失败时会回退本次代码更新。
 - `patch` 保留为更严格的 staging 更新路径：只接受干净工作区和 fast-forward 更新，并先构建新 venv；依赖安装失败时保留旧代码和旧 venv。
 
 ## napcat.sh
@@ -411,6 +413,71 @@ napcat -q
 
 - `install` 会把 installer 下载到临时目录，非空和 `bash -n` 校验通过后执行；执行成功后才发布到 `napcat-install.sh`。
 - `patch` 会临时下载和编译 launcher，下载、编译或 chmod 失败时保留旧 `.so`。
+
+## newapi.sh
+
+New API Docker Compose 管理脚本，默认管理已存在的 `/root/newapi-manual/docker-compose.yml` 服务栈，提供启动、停止、日志、状态、应用容器重启和镜像更新。
+
+默认值：
+
+- 应用目录：`/root/newapi-manual`
+- Compose 文件：`/root/newapi-manual/docker-compose.yml`
+- 主服务：`new-api`
+- 数据目录：`/root/newapi-manual/data`
+- 备份目录：`/root/newapi-manual/backups`
+- 快捷命令：`/usr/local/bin/newapi`
+
+常用命令：
+
+```bash
+bash newapi.sh deploy
+newapi start
+newapi stop
+newapi status
+newapi log
+newapi log -f
+newapi restart
+newapi update
+```
+
+说明：
+
+- 脚本不生成 `docker-compose.yml`，需要先准备好 `/root/newapi-manual/docker-compose.yml`。
+- `update` 会在 `data` 目录存在时先把 `data` 和 `logs` 打包到 `backups/`，再拉取并重建 `new-api` 应用容器。
+- `deploy` 只安装快捷命令，不要求 Compose 文件已存在；可用 `NEWAPI_INSTALL_PATH` 覆盖安装路径。
+
+## sub2api.sh
+
+Sub2API Docker Compose 管理脚本，默认管理已存在的 `/root/sub2api-manual/docker-compose.yml` 服务栈，提供启动、停止、日志、状态、应用容器重启和镜像更新。
+
+默认值：
+
+- 应用目录：`/root/sub2api-manual`
+- Compose 文件：`/root/sub2api-manual/docker-compose.yml`
+- 主服务：`sub2api`
+- PostgreSQL 容器：`sub2api-postgres`
+- 数据库用户：`sub2api`
+- 数据库名：`sub2api`
+- 快捷命令：`/usr/local/bin/sub2api`
+
+常用命令：
+
+```bash
+bash sub2api.sh deploy
+sub2api start
+sub2api stop
+sub2api status
+sub2api log
+sub2api log -f
+sub2api restart
+sub2api update
+```
+
+说明：
+
+- 脚本不生成 `docker-compose.yml`，需要先准备好 `/root/sub2api-manual/docker-compose.yml`。
+- `update` 会在 `sub2api-postgres` 容器运行时先执行 `pg_dump` 到应用目录，再拉取并重建 `sub2api` 应用容器。
+- `deploy` 只安装快捷命令，不要求 Compose 文件已存在；可用 `SUB2API_INSTALL_PATH` 覆盖安装路径。
 
 ## 常见组合
 
@@ -468,6 +535,18 @@ napcat patch
 napcat -q <QQ号> start
 ```
 
+管理 Docker Compose 应用：
+
+```bash
+bash newapi.sh deploy
+newapi status
+newapi update
+
+bash sub2api.sh deploy
+sub2api status
+sub2api update
+```
+
 ## 依赖速查
 
 | 脚本 | 主要依赖 |
@@ -479,6 +558,8 @@ napcat -q <QQ号> start
 | `mihomo.sh` | `systemd`, `curl`, `wget`, `unzip`, `tar`, `gzip`, `file` |
 | `astr.sh` | `git`, `python3`, `python3-venv`, `pip`, `screen` |
 | `napcat.sh` | `curl`, `git`, `node/npm`, `make/gcc`, `xvfb`, `screen`, `qq` |
+| `newapi.sh` | `docker`, Docker Compose plugin, `tar` |
+| `sub2api.sh` | `docker`, Docker Compose plugin, `pg_dump` inside PostgreSQL container |
 
 ## 开发与校验
 

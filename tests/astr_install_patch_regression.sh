@@ -164,6 +164,21 @@ ASTR_REPO_URL="$repo" install_astr >/dev/null
 assert_venv_activates "$VENV_DIR"
 assert_no_astr_temp "$TMP_DIR/repair-broken"
 
+conflict_repo="$TMP_DIR/conflict-repo"
+create_repo "$conflict_repo"
+set_astr_paths untracked-conflict
+ASTR_REPO_URL="$conflict_repo" install_astr >/dev/null
+conflict_head="$(git -C "$APP_DIR" rev-parse HEAD)"
+printf '%s\n' "local artifact" > "$APP_DIR/local-only.txt"
+printf '%s\n' "remote tracked" > "$conflict_repo/local-only.txt"
+git -C "$conflict_repo" add local-only.txt
+git -C "$conflict_repo" commit -q -m "add conflicting tracked file"
+if update_astr >/dev/null 2>/dev/null; then
+    fail "update should refuse to overwrite untracked local files"
+fi
+[[ "$(git -C "$APP_DIR" rev-parse HEAD)" == "$conflict_head" ]] || fail "untracked conflict should preserve old HEAD"
+grep -qx "local artifact" "$APP_DIR/local-only.txt" || fail "untracked conflict should preserve local file"
+
 set_astr_paths success
 ASTR_REPO_URL="$repo" install_astr >/dev/null
 [[ -d "$APP_DIR/.git" ]] || fail "install should publish app repo"
@@ -181,9 +196,12 @@ fi
 grep -qx "old venv" "$VENV_DIR/marker" || fail "failed patch should preserve old venv"
 assert_no_astr_temp "$TMP_DIR/success"
 
+printf '%s\n' "local tracked edit" > "$APP_DIR/requirements.txt"
+printf '%s\n' "local untracked artifact" > "$APP_DIR/local-artifact.txt"
 FAKE_ASTR_REQUIRE_ACTIVATED=1 update_astr >/dev/null
 grep -qx "new-requirement" "$APP_DIR/requirements.txt" || fail "update should git pull latest requirements"
 grep -qx "old venv" "$VENV_DIR/marker" || fail "update should reuse existing venv"
+grep -qx "local untracked artifact" "$APP_DIR/local-artifact.txt" || fail "update should preserve untracked local files"
 grep -q -- "-r $APP_DIR/requirements.txt" "$FAKE_ASTR_LOG" || fail "update should install requirements from app dir"
 assert_venv_activates "$VENV_DIR"
 

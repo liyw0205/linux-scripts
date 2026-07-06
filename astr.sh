@@ -27,7 +27,7 @@ usage() {
   astr status                 查看状态
   astr log                    查看并跟随日志
   astr install                安装依赖、克隆仓库并创建虚拟环境
-  astr update                 git pull 更新代码并在虚拟环境中刷新依赖
+  astr update                 拉取 upstream 后重置代码并在虚拟环境中刷新依赖
   astr patch                  更新 AstrBot 代码并刷新 Python 依赖
   astr deploy                 将本脚本安装到系统命令 (默认 /usr/local/bin/astr)
 
@@ -325,8 +325,37 @@ patch_astr() {
     echo "AstrBot patch 完成"
 }
 
+first_untracked_reset_conflict() {
+    local repo_dir="$1"
+    local target="$2"
+    local path prefix type
+
+    while IFS= read -r -d '' path; do
+        [[ -n "${path}" ]] || continue
+        if git -C "${repo_dir}" cat-file -e "${target}:${path}" 2>/dev/null; then
+            printf '%s\n' "${path}"
+            return 0
+        fi
+
+        prefix="${path}"
+        while [[ "${prefix}" == */* ]]; do
+            prefix="${prefix%/*}"
+            type="$(git -C "${repo_dir}" cat-file -t "${target}:${prefix}" 2>/dev/null || true)"
+            if [[ -n "${type}" && "${type}" != "tree" ]]; then
+                printf '%s\n' "${path}"
+                return 0
+            fi
+        done
+    done < <(
+        git -C "${repo_dir}" ls-files --others --exclude-standard -z
+        git -C "${repo_dir}" ls-files --others --ignored --exclude-standard -z
+    )
+
+    return 1
+}
+
 update_astr() {
-    local old_head new_head supervisor_pid app_pid
+    local old_head upstream new_head untracked_conflict supervisor_pid app_pid
 
     if [[ ! -d "${APP_DIR}/.git" ]]; then
         echo "未找到 Git 仓库: ${APP_DIR}，请先执行 astr install" >&2
@@ -336,17 +365,28 @@ update_astr() {
         echo "未找到虚拟环境: ${VENV_DIR}，请先执行 astr install" >&2
         return 1
     fi
-    if ! git -C "${APP_DIR}" diff --quiet || ! git -C "${APP_DIR}" diff --cached --quiet; then
-        echo "工作区存在未提交修改，拒绝自动 update: ${APP_DIR}" >&2
-        return 1
-    fi
 
     echo "更新 AstrBot 代码..."
     old_head="$(git -C "${APP_DIR}" rev-parse HEAD)" || return 1
-    if ! git -C "${APP_DIR}" pull --ff-only; then
+    if ! git -C "${APP_DIR}" fetch --prune; then
         return 1
     fi
-    new_head="$(git -C "${APP_DIR}" rev-parse HEAD)" || return 1
+    if ! upstream="$(git -C "${APP_DIR}" rev-parse --abbrev-ref --symbolic-full-name '@{u}')"; then
+        echo "当前分支未设置 upstream，无法安全 update" >&2
+        return 1
+    fi
+    new_head="$(git -C "${APP_DIR}" rev-parse "${upstream}")" || return 1
+
+    if untracked_conflict="$(first_untracked_reset_conflict "${APP_DIR}" "${new_head}")"; then
+        echo "未跟踪本地文件会被远端覆盖，拒绝 update: ${APP_DIR}/${untracked_conflict}" >&2
+        echo "请先移动或备份该文件后重试" >&2
+        return 1
+    fi
+
+    echo "本地已跟踪修改将被远端覆盖；未跟踪文件会保留"
+    if ! git -C "${APP_DIR}" reset --hard "${new_head}"; then
+        return 1
+    fi
 
     echo "进入虚拟环境并安装依赖: ${VENV_DIR}"
     if ! install_requirements "${VENV_DIR}" "${APP_DIR}/requirements.txt"; then

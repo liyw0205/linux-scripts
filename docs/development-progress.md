@@ -727,7 +727,40 @@
 - 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
 - 未执行真实 cloudflared 远程删除、真实 systemd 启停或外部服务部署。
 
-## 阶段 19 预期
+## 阶段 19：New API / Sub2API 脚本文档同步
+
+日期：2026-07-06
+
+### 已完成
+
+- 新增 `newapi.sh` 和 `sub2api.sh` 并纳入 README：
+  - 文件概览增加两个 Docker Compose 管理脚本。
+  - 分别补充默认目录、Compose 文件、主服务、备份位置或数据库信息。
+  - 补充 `deploy`、`start`、`stop`、`status`、`log`、`restart`、`update` 常用命令。
+  - 补充 `update` 备份行为、快捷命令安装路径覆盖变量和依赖速查。
+- `newapi.sh` / `sub2api.sh`
+  - shebang 调整到首行，保证脚本直接执行路径可用。
+  - `deploy` 和 `--help` 不再要求已有 `docker-compose.yml`。
+  - 服务栈管理命令仍会先检查对应 Compose 文件存在。
+- `astr.sh`
+  - usage 和 README 同步当前 `update` 行为：先 `fetch` upstream，再将已跟踪文件重置到远端版本。
+  - 明确 `update` 会保留不冲突的未跟踪文件，并拒绝覆盖会与远端目标冲突的未跟踪文件。
+
+### 验证结果
+
+- `bash -n newapi.sh sub2api.sh astr.sh tests/astr_install_patch_regression.sh` 通过。
+- `bash newapi.sh --help` 通过。
+- `bash sub2api.sh --help` 通过。
+- 使用临时安装路径验证 `newapi.sh deploy` 和 `sub2api.sh deploy` 不依赖 Compose 文件。
+- `make validate` 通过。
+- `git diff --check` 通过。
+
+### 发现但未完成
+
+- 当前环境仍缺少 `shellcheck`、`shfmt` 和 `bats`，可选 lint 仍会跳过，测试继续使用 Bash fallback。
+- 未执行真实 Docker Compose 启停、镜像更新、数据库备份、New API/Sub2API 服务运行或 AstrBot 外部仓库更新。
+
+## 阶段 20 预期
 
 继续做低风险维护收敛：
 
