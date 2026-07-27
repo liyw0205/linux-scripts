@@ -20,12 +20,14 @@ STOP_FILE="${STATE_DIR}/stopping"
 SYSTEMD_UNIT="${NAPCAT_SYSTEMD_UNIT:-napcat.service}"
 SELF="${BASH_SOURCE[0]}"
 SCREEN_SESSION="${NAPCAT_SCREEN_SESSION:-napcat}"
-STOP_TERM_ATTEMPTS="${NAPCAT_STOP_TERM_ATTEMPTS:-8}"
-STOP_KILL_ATTEMPTS="${NAPCAT_STOP_KILL_ATTEMPTS:-8}"
-STOP_WAIT_INTERVAL="${NAPCAT_STOP_WAIT_INTERVAL:-0.25}"
-[[ "${STOP_TERM_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_TERM_ATTEMPTS=8
-[[ "${STOP_KILL_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_KILL_ATTEMPTS=8
-[[ "${STOP_WAIT_INTERVAL}" =~ ^[0-9]+([.][0-9]+)?$ ]] || STOP_WAIT_INTERVAL=0.25
+STOP_TERM_ATTEMPTS="${NAPCAT_STOP_TERM_ATTEMPTS:-20}"
+STOP_KILL_ATTEMPTS="${NAPCAT_STOP_KILL_ATTEMPTS:-12}"
+STOP_WAIT_INTERVAL="${NAPCAT_STOP_WAIT_INTERVAL:-0.5}"
+STOP_FLUSH_SECONDS="${NAPCAT_STOP_FLUSH_SECONDS:-3}"
+[[ "${STOP_TERM_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_TERM_ATTEMPTS=20
+[[ "${STOP_KILL_ATTEMPTS}" =~ ^[0-9]+$ ]] || STOP_KILL_ATTEMPTS=12
+[[ "${STOP_WAIT_INTERVAL}" =~ ^[0-9]+([.][0-9]+)?$ ]] || STOP_WAIT_INTERVAL=0.5
+[[ "${STOP_FLUSH_SECONDS}" =~ ^[0-9]+([.][0-9]+)?$ ]] || STOP_FLUSH_SECONDS=3
 
 QQ_BIN="${NAPCAT_QQ_BIN:-}"
 if [[ -z "${QQ_BIN}" ]]; then
@@ -543,7 +545,9 @@ linuxqq_package_url() {
     return 0
   fi
 
-  # 旧 dldir1.qq.com/QQNT/8015ff90 链接已 404；使用当前可用 QQNT deb/rpm。
+  # 旧 dldir1 历史包多已 404；当前公网仍可下载的是 QQNT 3.2.31。
+  # 注意：NapCat Shell v4.18.13 PacketBackend 最高支持到 3.2.30-50969，
+  # 3.2.31-51102 可登录但 Packet 能力与快速登录稳定性受影响。
   if [[ "${arch}" == "amd64" ]]; then
     if [[ "${installer}" == "rpm" ]]; then
       printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_x86_64_01.rpm"
@@ -559,6 +563,63 @@ linuxqq_package_url() {
   else
     return 1
   fi
+}
+
+linuxqq_version_string() {
+  local version=""
+
+  if command -v dpkg-query >/dev/null 2>&1; then
+    version="$(dpkg-query -W -f='${Version}' linuxqq 2>/dev/null || true)"
+  fi
+  if [[ -z "${version}" && -r /opt/QQ/resources/app/package.json ]]; then
+    version="$(python3 - <<'PY' 2>/dev/null || true
+import json
+print(json.load(open("/opt/QQ/resources/app/package.json")).get("version",""))
+PY
+)"
+  fi
+  printf '%s\n' "${version}"
+}
+
+napcat_packet_supports_qq() {
+  local version="$1"
+  local mjs="${NAPCAT_DIR}/napcat.mjs"
+  local key arch_raw arch_key
+
+  [[ -n "${version}" && -f "${mjs}" ]] || return 1
+  arch_raw="$(uname -m 2>/dev/null || true)"
+  case "${arch_raw}" in
+    aarch64|arm64) arch_key="arm64" ;;
+    *) arch_key="x64" ;;
+  esac
+  key="${version}-${arch_key}"
+  # napcat.mjs 内嵌 Packet 版本表；无该 key 则快速登录/部分能力会失败。
+  grep -F -q "\"${key}\"" "${mjs}" 2>/dev/null
+}
+
+warn_qq_packet_compat() {
+  local version
+  version="$(linuxqq_version_string)"
+  [[ -n "${version}" ]] || return 0
+  if napcat_packet_supports_qq "${version}"; then
+    return 0
+  fi
+  echo "警告: 当前 LinuxQQ ${version} 不在 NapCat PacketBackend 支持表内" >&2
+  echo "      表现: 扫码可登录，但重启后快速登录常提示“登录态已失效”" >&2
+  echo "      NapCat Shell v4.18.13 最高支持到 3.2.30-50969；推荐官方文档中的 3.2.23-44343" >&2
+  echo "      若公网已无旧包，可设置 NAPCAT_QQ_PACKAGE_URL 指向兼容 deb/rpm 后执行 napcat install-qq" >&2
+}
+
+signal_stop_to_runner() {
+  local pid=""
+
+  if pid="$(pid_from_file 2>/dev/null)"; then
+    kill -TERM "${pid}" 2>/dev/null || true
+  fi
+  while IFS= read -r pid; do
+    [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+    kill -TERM "${pid}" 2>/dev/null || true
+  done < <(managed_run_pids)
 }
 
 run_privileged() {
@@ -732,6 +793,8 @@ start_napcat() {
   rotate_log_if_needed
   rm -f "${STOP_FILE}"
   cleanup_stale_pid
+  require_install
+  warn_qq_packet_compat
 
   if is_running; then
     local pid qq
@@ -818,7 +881,12 @@ stop_napcat() {
     had_processes=1
   fi
 
+  # 先写停止标记并通知 _run，让其自行收尾，减少 KILL 截断登录态落盘。
   touch "${STOP_FILE}"
+  signal_stop_to_runner
+  if [[ "$(printf '%.0f' "${STOP_FLUSH_SECONDS}" 2>/dev/null || echo 0)" != "0" ]]; then
+    sleep "${STOP_FLUSH_SECONDS}"
+  fi
 
   if use_systemd; then
     systemctl stop "${SYSTEMD_UNIT}" >/dev/null 2>&1 || true

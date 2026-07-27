@@ -413,7 +413,9 @@ napcat -q
 说明：
 
 - `install` 会把 installer 下载到临时目录，非空和 `bash -n` 校验通过后执行；执行成功后才发布到 `napcat-install.sh`，并确保 LinuxQQ 可执行文件可用。
-- `install-qq` 仅下载并安装当前可用的 LinuxQQ deb/rpm（旧 dldir1 下载链已 404）。
+- `install-qq` 仅下载并安装当前公网可用的 LinuxQQ deb/rpm（默认 QQNT 3.2.31；可用 `NAPCAT_QQ_PACKAGE_URL` 覆盖）。
+- 注意：NapCat Shell v4.18.13 PacketBackend 最高支持到 `3.2.30-50969`。若 LinuxQQ 过新（如 `3.2.31-51102`），可能出现扫码能登录、重启后快速登录失效。
+- `stop`/`restart` 会先通知 `_run` 并等待短时落盘，再 TERM/KILL，降低登录态被硬杀截断的概率。
 - `patch` 会临时下载和编译 launcher，下载、编译或 chmod 失败时保留旧 `.so`。
 - 启动依赖：`napcat` 目录、`libnapcat_launcher.so`、`qq`、`Xvfb`。
 ## newapi.sh
