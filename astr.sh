@@ -153,9 +153,111 @@ build_venv_at_path() {
     fi
 }
 
+# GitHub 加速镜像（空行表示直连回退；顺序为优先尝试）
+get_github_mirrors() {
+    echo "https://ghfast.top/"
+    echo "https://gh-proxy.net/"
+    echo "https://gh.llkk.cc/"
+    echo "https://ghproxy.net/"
+    echo "https://ghfile.geekertao.top/"
+    echo "https://git.yylx.win/"
+    echo "https://github.dpik.top/"
+    echo "https://hub.gitmirror.com/"
+    echo "https://gitproxy.click/"
+    echo "https://gh-proxy.com/"
+    echo ""
+}
+
+mirror_clone_url() {
+    local mirror="$1"
+    local repo_url="$2"
+
+    if [[ -z "${mirror}" ]]; then
+        printf '%s\n' "${repo_url}"
+        return 0
+    fi
+    printf '%s%s\n' "${mirror}" "${repo_url}"
+}
+
+git_clone_depth1() {
+    local clone_url="$1"
+    local dest="$2"
+    local timeout_sec="${ASTR_CLONE_TIMEOUT:-120}"
+
+    if command -v timeout >/dev/null 2>&1; then
+        GIT_HTTP_VERSION=HTTP/1.1 timeout "${timeout_sec}" \
+            git -c http.version=HTTP/1.1 clone --depth 1 "${clone_url}" "${dest}"
+    else
+        GIT_HTTP_VERSION=HTTP/1.1 git -c http.version=HTTP/1.1 clone --depth 1 "${clone_url}" "${dest}"
+    fi
+}
+
+is_github_https_url() {
+    local repo_url="$1"
+    [[ "${repo_url}" =~ ^https://(www\.)?github\.com/ ]]
+}
+
+clone_looks_valid() {
+    local dest="$1"
+
+    [[ -d "${dest}/.git" ]] || return 1
+    git -C "${dest}" rev-parse --verify HEAD >/dev/null 2>&1 || return 1
+    # 空仓库也能 clone 成功，必须拒绝
+    [[ -n "$(git -C "${dest}" rev-list -n 1 HEAD 2>/dev/null || true)" ]] || return 1
+    return 0
+}
+
+clone_repo_with_mirrors() {
+    local repo_url="$1"
+    local dest="$2"
+    local mirror clone_url use_mirrors=0
+
+    rmdir "${dest}" 2>/dev/null || true
+    if [[ -e "${dest}" ]]; then
+        echo "克隆目标已存在: ${dest}" >&2
+        return 1
+    fi
+
+    if is_github_https_url "${repo_url}"; then
+        use_mirrors=1
+    fi
+
+    if [[ "${use_mirrors}" -eq 0 ]]; then
+        echo "克隆仓库: ${repo_url}"
+        rm -rf "${dest}"
+        if git_clone_depth1 "${repo_url}" "${dest}" && clone_looks_valid "${dest}"; then
+            return 0
+        fi
+        rm -rf "${dest}"
+        echo "克隆失败: ${repo_url}" >&2
+        return 1
+    fi
+
+    while IFS= read -r mirror; do
+        clone_url="$(mirror_clone_url "${mirror}" "${repo_url}")"
+        if [[ -z "${mirror}" ]]; then
+            echo "尝试直连克隆: ${repo_url}"
+        else
+            echo "尝试加速克隆: ${mirror}"
+        fi
+        rm -rf "${dest}"
+        if git_clone_depth1 "${clone_url}" "${dest}" && clone_looks_valid "${dest}"; then
+            if git -C "${dest}" remote get-url origin >/dev/null 2>&1; then
+                git -C "${dest}" remote set-url origin "${repo_url}" || true
+            fi
+            return 0
+        fi
+        rm -rf "${dest}"
+    done < <(get_github_mirrors)
+
+    echo "所有加速源与直连克隆均失败: ${repo_url}" >&2
+    return 1
+}
+
 install_astr() {
     local repo_url="${ASTR_REPO_URL:-https://github.com/AstrBotDevs/AstrBot.git}"
     local base_dir app_name venv_parent venv_name tmp_app backup_venv=""
+    local reuse_existing_venv=0
 
     echo "开始安装 AstrBot..."
 
@@ -221,6 +323,7 @@ install_astr() {
             echo "虚拟环境目录已存在但不可用，拒绝覆盖: ${VENV_DIR}" >&2
             return 1
         fi
+        reuse_existing_venv=1
         echo "复用已有虚拟环境，不删除或覆盖: ${VENV_DIR}"
     fi
 
@@ -229,7 +332,7 @@ install_astr() {
     mkdir -p "${base_dir}" "${venv_parent}"
     tmp_app="$(mktemp -d "${base_dir}/.${app_name}.clone.XXXXXX")" || return 1
 
-    if ! git clone "${repo_url}" "${tmp_app}"; then
+    if ! clone_repo_with_mirrors "${repo_url}" "${tmp_app}"; then
         rm -rf "${tmp_app}"
         return 1
     fi
@@ -238,7 +341,7 @@ install_astr() {
         rm -rf "${tmp_app}"
         return 1
     fi
-    if venv_is_usable "${VENV_DIR}"; then
+    if [[ "${reuse_existing_venv}" -eq 1 ]] || venv_is_usable "${VENV_DIR}"; then
         if ! install_requirements "${VENV_DIR}" "${tmp_app}/requirements.txt"; then
             rm -rf "${tmp_app}"
             return 1
@@ -250,7 +353,10 @@ install_astr() {
 
     rmdir "${APP_DIR}" 2>/dev/null || true
     if ! mv "${tmp_app}" "${APP_DIR}"; then
-        rm -rf "${tmp_app}" "${VENV_DIR}"
+        rm -rf "${tmp_app}"
+        if [[ "${reuse_existing_venv}" -eq 0 ]]; then
+            rm -rf "${VENV_DIR}"
+        fi
         return 1
     fi
 

@@ -162,6 +162,52 @@ grep -qx "shared-runtime" "$VENV_DIR/shared-marker" || fail "usable existing ven
 assert_venv_activates "$VENV_DIR"
 assert_no_astr_temp "$TMP_DIR/reuse-existing-venv"
 
+# Mirror-assisted clone: first mirror fails, second succeeds, origin restored to canonical URL.
+set_astr_paths mirror-clone
+clone_log="$TMP_DIR/mirror-clone/clone.log"
+mkdir -p "$TMP_DIR/mirror-clone"
+: > "$clone_log"
+canonical_url="https://github.com/example-org/AstrBot.git"
+get_github_mirrors() {
+    echo "https://mirror-a.invalid/"
+    echo "https://mirror-b.invalid/"
+    echo ""
+}
+git_clone_depth1() {
+    local url="$1"
+    local dest="$2"
+    printf '%s\n' "$url" >> "$clone_log"
+    if [[ "$url" == "https://mirror-a.invalid/${canonical_url}" ]]; then
+        # empty-looking success must still be rejected by clone_looks_valid
+        mkdir -p "$dest/.git"
+        return 0
+    fi
+    if [[ "$url" == "https://mirror-b.invalid/${canonical_url}" || "$url" == "${canonical_url}" ]]; then
+        command git clone -q "$repo" "$dest"
+        return $?
+    fi
+    return 1
+}
+git() {
+    if [[ "${1:-}" == "-C" && "${3:-}" == "remote" && "${4:-}" == "set-url" ]]; then
+        printf 'set-url %s\n' "${5:-} ${6:-}" >> "$clone_log"
+        command git "$@"
+        return $?
+    fi
+    command git "$@"
+}
+if ! clone_repo_with_mirrors "${canonical_url}" "$APP_DIR" >/dev/null; then
+    fail "clone_repo_with_mirrors should succeed via second mirror"
+fi
+grep -qx "https://mirror-a.invalid/${canonical_url}" "$clone_log" || fail "first mirror should be tried"
+grep -qx "https://mirror-b.invalid/${canonical_url}" "$clone_log" || fail "second mirror should be tried"
+grep -q "set-url origin ${canonical_url}" "$clone_log" || fail "origin should be restored to canonical URL"
+[[ "$(command git -C "$APP_DIR" remote get-url origin)" == "${canonical_url}" ]] || fail "published origin should be canonical"
+assert_no_astr_temp "$TMP_DIR/mirror-clone"
+unset -f git git_clone_depth1 get_github_mirrors
+# shellcheck disable=SC1090
+. "$ROOT_DIR/astr.sh"
+
 set_astr_paths repair-broken
 git clone -q "$repo" "$APP_DIR"
 bad_venv="$TMP_DIR/repair-broken/.venv.venv.bad"
