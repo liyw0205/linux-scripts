@@ -44,7 +44,8 @@ usage() {
   napcat status               查看状态
   napcat log                  查看并跟随日志
   napcat install              下载并安装 NapCat，并确保 LinuxQQ 可用
-  napcat install-qq           仅安装/修复 LinuxQQ
+  napcat install-qq           仅安装/修复 LinuxQQ（默认兼容包 3.2.23-44343）
+  napcat install-qq --force   强制重装/降级 LinuxQQ
   napcat patch                下载并编译 NapCat Linux 启动器补丁
   napcat deploy               将本脚本安装到系统命令 (默认 /usr/local/bin/napcat)
   napcat -q 3834455831        设置 start 使用的 QQ 号
@@ -536,33 +537,81 @@ detect_linux_arch() {
   esac
 }
 
-linuxqq_package_url() {
+linuxqq_package_urls() {
   local arch="$1"
   local installer="$2"
+  local name=""
 
   if [[ -n "${NAPCAT_QQ_PACKAGE_URL:-}" ]]; then
     printf '%s\n' "${NAPCAT_QQ_PACKAGE_URL}"
     return 0
   fi
 
-  # 旧 dldir1 历史包多已 404；当前公网仍可下载的是 QQNT 3.2.31。
-  # 注意：NapCat Shell v4.18.13 PacketBackend 最高支持到 3.2.30-50969，
-  # 3.2.31-51102 可登录但 Packet 能力与快速登录稳定性受影响。
-  if [[ "${arch}" == "amd64" ]]; then
-    if [[ "${installer}" == "rpm" ]]; then
-      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_x86_64_01.rpm"
-    else
-      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_amd64_01.deb"
-    fi
-  elif [[ "${arch}" == "arm64" ]]; then
-    if [[ "${installer}" == "rpm" ]]; then
-      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_aarch64_01.rpm"
-    else
-      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_arm64_01.deb"
-    fi
+  # NapCat 推荐 3.2.23-44343；腾讯官方 dldir1 链已 404。
+  # 默认走第三方备份（Wayback raw/id_），可用 NAPCAT_QQ_PACKAGE_URL 覆盖。
+  if [[ "${arch}" == "amd64" && "${installer}" == "dpkg" ]]; then
+    name="linuxqq_3.2.23-44343_amd64.deb"
+    printf '%s\n' \
+      "https://web.archive.org/web/20260110145112id_/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}" \
+      "https://web.archive.org/web/20260110145112/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}"
+  elif [[ "${arch}" == "amd64" && "${installer}" == "rpm" ]]; then
+    name="linuxqq_3.2.23-44343_x86_64.rpm"
+    printf '%s\n' \
+      "https://web.archive.org/web/20260110160913id_/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}" \
+      "https://web.archive.org/web/20260110160913/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}"
+  elif [[ "${arch}" == "arm64" && "${installer}" == "dpkg" ]]; then
+    name="linuxqq_3.2.23-44343_arm64.deb"
+    printf '%s\n' \
+      "https://web.archive.org/web/20260110154110id_/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}" \
+      "https://web.archive.org/web/20260110154110/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}"
+  elif [[ "${arch}" == "arm64" && "${installer}" == "rpm" ]]; then
+    name="linuxqq_3.2.23-44343_aarch64.rpm"
+    printf '%s\n' \
+      "https://web.archive.org/web/20260110153635id_/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}" \
+      "https://web.archive.org/web/20260110153635/https://dldir1.qq.com/qqfile/qq/QQNT/94704804/${name}"
   else
     return 1
   fi
+}
+
+linuxqq_package_url() {
+  local arch="$1"
+  local installer="$2"
+  local url=""
+
+  # 兼容旧调用：返回第一个候选源。
+  url="$(linuxqq_package_urls "${arch}" "${installer}" | head -n 1)" || return 1
+  [[ -n "${url}" ]] || return 1
+  printf '%s\n' "${url}"
+}
+
+download_linuxqq_package() {
+  local dest="$1"
+  shift
+  local url=""
+  local min_bytes="${NAPCAT_QQ_PACKAGE_MIN_BYTES:-50000000}"
+  local ok=0
+  local size=0
+
+  : > "${dest}"
+  for url in "$@"; do
+    [[ -n "${url}" ]] || continue
+    echo "下载: ${url}"
+    rm -f "${dest}"
+    if curl -k -fSL --connect-timeout 20 --max-time 900 -A "Mozilla/5.0" -o "${dest}" "${url}"; then
+      size="$(wc -c < "${dest}" 2>/dev/null | tr -d ' ' || echo 0)"
+      if [[ "${size}" =~ ^[0-9]+$ ]] && [[ "${size}" -ge "${min_bytes}" ]]; then
+        ok=1
+        break
+      fi
+      echo "下载结果过小(${size} bytes)，尝试下一源" >&2
+    else
+      echo "下载失败，尝试下一源" >&2
+    fi
+    rm -f "${dest}"
+  done
+
+  [[ "${ok}" -eq 1 && -s "${dest}" ]]
 }
 
 linuxqq_version_string() {
@@ -606,8 +655,8 @@ warn_qq_packet_compat() {
   fi
   echo "警告: 当前 LinuxQQ ${version} 不在 NapCat PacketBackend 支持表内" >&2
   echo "      表现: 扫码可登录，但重启后快速登录常提示“登录态已失效”" >&2
-  echo "      NapCat Shell v4.18.13 最高支持到 3.2.30-50969；推荐官方文档中的 3.2.23-44343" >&2
-  echo "      若公网已无旧包，可设置 NAPCAT_QQ_PACKAGE_URL 指向兼容 deb/rpm 后执行 napcat install-qq" >&2
+  echo "      推荐兼容包: 3.2.23-44343；可执行: napcat install-qq --force" >&2
+  echo "      也可用 NAPCAT_QQ_PACKAGE_URL 指定兼容 deb/rpm 后执行 napcat install-qq --force" >&2
 }
 
 signal_stop_to_runner() {
@@ -634,12 +683,23 @@ run_privileged() {
 }
 
 install_linuxqq() {
-  local arch package_installer package_manager package_url tmp_dir package_file
+  local arch package_installer package_manager package_file tmp_dir
   local force="${1:-0}"
+  local version=""
+  local -a package_urls=()
 
-  if [[ "${force}" != "1" ]] && resolve_qq_bin; then
-    echo "已检测到 LinuxQQ: ${QQ_BIN}"
-    return 0
+  if resolve_qq_bin && [[ "${force}" != "1" ]]; then
+    version="$(linuxqq_version_string)"
+    if [[ -f "${NAPCAT_DIR}/napcat.mjs" ]]; then
+      if napcat_packet_supports_qq "${version}"; then
+        echo "已检测到兼容 LinuxQQ: ${QQ_BIN} (${version:-unknown})"
+        return 0
+      fi
+      echo "已检测到 LinuxQQ: ${QQ_BIN} (${version:-unknown})，但不在 Packet 支持表内，将重装兼容版本"
+    else
+      echo "已检测到 LinuxQQ: ${QQ_BIN}"
+      return 0
+    fi
   fi
 
   arch="$(detect_linux_arch)"
@@ -663,13 +723,13 @@ install_linuxqq() {
     return 1
   fi
 
-  package_url="$(linuxqq_package_url "${arch}" "${package_installer}")" || {
+  mapfile -t package_urls < <(linuxqq_package_urls "${arch}" "${package_installer}") || true
+  if [[ "${#package_urls[@]}" -eq 0 ]]; then
     echo "无法确定 LinuxQQ 下载地址" >&2
     return 1
-  }
+  fi
 
-  echo "开始安装 LinuxQQ..."
-  echo "下载: ${package_url}"
+  echo "开始安装 LinuxQQ (NapCat 兼容包 3.2.23-44343)..."
   tmp_dir="$(mktemp -d "${BASE_DIR}/.napcat-qq.XXXXXX")" || return 1
   if [[ "${package_installer}" == "dpkg" ]]; then
     package_file="${tmp_dir}/QQ.deb"
@@ -677,35 +737,35 @@ install_linuxqq() {
     package_file="${tmp_dir}/QQ.rpm"
   fi
 
-  if ! curl -k -fSL --connect-timeout 15 --max-time 600 -o "${package_file}" "${package_url}"; then
-    echo "LinuxQQ 下载失败: ${package_url}" >&2
-    rm -rf "${tmp_dir}"
-    return 1
-  fi
-  if [[ ! -s "${package_file}" ]]; then
-    echo "LinuxQQ 下载结果为空: ${package_url}" >&2
+  if ! download_linuxqq_package "${package_file}" "${package_urls[@]}"; then
+    echo "LinuxQQ 下载失败，已尝试:" >&2
+    printf '  %s\n' "${package_urls[@]}" >&2
     rm -rf "${tmp_dir}"
     return 1
   fi
 
   if [[ "${package_manager}" == "apt-get" ]]; then
     if ! run_privileged apt-get install -f -y --allow-downgrades -qq "${package_file}"; then
-      echo "LinuxQQ deb 安装失败" >&2
-      rm -rf "${tmp_dir}"
-      return 1
+      # 某些环境 apt 拒绝降级时回退 dpkg。
+      if ! run_privileged dpkg -i --force-downgrade "${package_file}"; then
+        echo "LinuxQQ deb 安装失败" >&2
+        rm -rf "${tmp_dir}"
+        return 1
+      fi
+      run_privileged apt-get install -f -y -qq >/dev/null 2>&1 || true
     fi
     run_privileged apt-get install -y --allow-downgrades -qq libnss3 libgbm1 >/dev/null 2>&1 || true
     run_privileged apt-get install -y --allow-downgrades -qq libasound2 >/dev/null 2>&1 \
       || run_privileged apt-get install -y --allow-downgrades -qq libasound2t64 >/dev/null 2>&1 \
       || true
   elif [[ "${package_manager}" == "dnf" ]]; then
-    if ! run_privileged dnf localinstall -y "${package_file}"; then
+    if ! run_privileged dnf localinstall -y --allowerasing "${package_file}"; then
       echo "LinuxQQ rpm 安装失败" >&2
       rm -rf "${tmp_dir}"
       return 1
     fi
   else
-    if ! run_privileged rpm -Uvh "${package_file}"; then
+    if ! run_privileged rpm -Uvh --oldpackage "${package_file}"; then
       echo "LinuxQQ rpm 安装失败" >&2
       rm -rf "${tmp_dir}"
       return 1
@@ -718,7 +778,12 @@ install_linuxqq() {
     echo "LinuxQQ 安装后仍未找到可执行文件 qq" >&2
     return 1
   fi
-  echo "LinuxQQ 安装完成: ${QQ_BIN}"
+  version="$(linuxqq_version_string)"
+  echo "LinuxQQ 安装完成: ${QQ_BIN} (${version:-unknown})"
+  if [[ -f "${NAPCAT_DIR}/napcat.mjs" ]] && ! napcat_packet_supports_qq "${version}"; then
+    echo "警告: 安装后的版本仍不在 Packet 支持表内: ${version}" >&2
+    return 1
+  fi
 }
 
 install_napcat() {
@@ -1253,7 +1318,21 @@ main() {
       install_napcat
       ;;
     install-qq|install_qq|qq-install)
-      install_linuxqq
+      local force=0
+      local arg
+      for arg in "${rest[@]}"; do
+        case "${arg}" in
+          --force|-f|force)
+            force=1
+            ;;
+          *)
+            echo "未知参数: ${arg}" >&2
+            usage >&2
+            exit 2
+            ;;
+        esac
+      done
+      install_linuxqq "${force}"
       ;;
     patch)
       patch_napcat

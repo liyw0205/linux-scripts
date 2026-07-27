@@ -40,7 +40,7 @@ done
 [[ -n "$out" ]] || exit 2
 
 # LinuxQQ package download path
-if [[ "${url}" == *"/QQ_"* || "${url}" == *"linuxqq"* || "${FAKE_CURL_TARGET:-}" == "qq" ]]; then
+if [[ "${url}" == *"/QQ_"* || "${url}" == *"linuxqq"* || "${url}" == *"web.archive.org"* || "${FAKE_CURL_TARGET:-}" == "qq" ]]; then
   case "${FAKE_QQ_CURL_MODE:-ok}" in
     fail)
       printf '%s\n' "partial qq package" > "$out"
@@ -50,8 +50,16 @@ if [[ "${url}" == *"/QQ_"* || "${url}" == *"linuxqq"* || "${FAKE_CURL_TARGET:-}"
       : > "$out"
       exit 0
       ;;
+    tiny)
+      # smaller than default NAPCAT_QQ_PACKAGE_MIN_BYTES
+      printf '%s\n' "tiny-qq-package" > "$out"
+      exit 0
+      ;;
     ok)
-      printf '%s\n' "fake-qq-package" > "$out"
+      # produce a large enough fake package for min-size checks
+      dd if=/dev/zero of="$out" bs=1024 count=64 status=none 2>/dev/null || python3 - <<PY
+open("$out","wb").write(b"0"*65536)
+PY
       exit 0
       ;;
   esac
@@ -189,12 +197,23 @@ done
 # success: installer runs, then linuxqq is installed because no existing qq
 base="$TMP_DIR/success"
 mkdir -p "$base"
-run_install "$base" env FAKE_CURL_MODE=ok FAKE_QQ_CURL_MODE=ok >/dev/null
+run_install "$base" env FAKE_CURL_MODE=ok FAKE_QQ_CURL_MODE=ok NAPCAT_QQ_PACKAGE_MIN_BYTES=1 >/dev/null
 grep -qx "installer ran" "$base/installer.marker" || fail "valid installer should execute"
 grep -q "FAKE_INSTALL_MARKER" "$base/napcat-install.sh" || fail "successful install should publish validated installer"
 [[ -x "$base/usr/bin/qq" ]] || fail "install should publish linuxqq binary via package install"
 grep -q "\.deb" "$base/apt.log" || fail "install should invoke apt-get with deb package"
 assert_no_temp_installers "$base"
+
+# default package URL should prefer archive backup, not live tencent latest
+url_list="$(
+  env PATH="$TMP_DIR/bin:$PATH" bash -c '
+    source "'"$ROOT_DIR"'/napcat.sh"
+    linuxqq_package_urls amd64 dpkg
+  '
+)"
+printf '%s\n' "$url_list" | grep -q 'web.archive.org' || fail "default qq urls should use archive backup"
+printf '%s\n' "$url_list" | grep -q '3.2.23-44343' || fail "default qq urls should pin compatible 3.2.23-44343"
+printf '%s\n' "$url_list" | grep -q 'qqdl.gtimg.cn.*3.2.31' && fail "default qq urls must not use incompatible 3.2.31"
 
 # install-qq alone when missing
 base="$TMP_DIR/qq-only"
@@ -209,11 +228,12 @@ env \
   FAKE_QQ_PATH="$base/usr/bin/qq" \
   FAKE_QQ_CURL_MODE=ok \
   FAKE_CURL_TARGET=qq \
+  NAPCAT_QQ_PACKAGE_MIN_BYTES=1 \
   bash "$ROOT_DIR/napcat.sh" install-qq >/dev/null
 [[ -x "$base/usr/bin/qq" ]] || fail "install-qq should create qq binary"
 assert_no_temp_installers "$base"
 
-# install-qq should reuse existing binary
+# install-qq should reuse existing binary when no napcat.mjs packet table is present
 reuse_log="$base/reuse.log"
 env \
   PATH="$TMP_DIR/bin:$PATH" \
@@ -224,8 +244,25 @@ env \
   FAKE_APT_LOG="$base/apt-reuse.log" \
   FAKE_QQ_PATH="$base/usr/bin/qq" \
   bash "$ROOT_DIR/napcat.sh" install-qq >"$reuse_log"
-grep -q "已检测到 LinuxQQ" "$reuse_log" || fail "install-qq should skip when qq already exists"
+grep -q "已检测到" "$reuse_log" || fail "install-qq should skip when qq already exists"
 [[ ! -e "$base/apt-reuse.log" || ! -s "$base/apt-reuse.log" ]] || fail "existing qq should not reinstall package"
+
+# force reinstall should download again even if qq exists
+force_log="$base/force.log"
+env \
+  PATH="$TMP_DIR/bin:$PATH" \
+  NAPCAT_BASE_DIR="$base" \
+  NAPCAT_QQ_BIN="$base/usr/bin/qq" \
+  NAPCAT_CLI_CONFIG_DIR="$base/config" \
+  NAPCAT_CLI_STATE_DIR="$base/state" \
+  FAKE_APT_LOG="$base/apt-force.log" \
+  FAKE_QQ_PATH="$base/usr/bin/qq" \
+  FAKE_QQ_CURL_MODE=ok \
+  FAKE_CURL_TARGET=qq \
+  NAPCAT_QQ_PACKAGE_MIN_BYTES=1 \
+  bash "$ROOT_DIR/napcat.sh" install-qq --force >"$force_log"
+grep -q "\.deb" "$base/apt-force.log" || fail "install-qq --force should reinstall package"
+assert_no_temp_installers "$base"
 
 # download failure should not leave temps
 base="$TMP_DIR/qq-fail"
@@ -240,6 +277,7 @@ if env \
   FAKE_QQ_PATH="$base/usr/bin/qq" \
   FAKE_QQ_CURL_MODE=fail \
   FAKE_CURL_TARGET=qq \
+  NAPCAT_QQ_PACKAGE_MIN_BYTES=1 \
   bash "$ROOT_DIR/napcat.sh" install-qq >/dev/null 2>/dev/null; then
   fail "install-qq should fail when package download fails"
 fi
