@@ -376,7 +376,7 @@ bash astr.sh start
 
 ## napcat.sh
 
-NapCat 单文件管理脚本，支持下载安装 NapCat、下载并编译 Linux 启动器补丁、设置启动 QQ 号、使用 `screen` 守护运行、异常退出自动重启、日志截断和状态查看。
+NapCat 单文件管理脚本，支持下载安装 NapCat、安装 LinuxQQ、下载并编译 Linux 启动器补丁、设置启动 QQ 号、使用 `screen` 守护运行、异常退出自动重启、日志截断和状态查看。
 
 默认值：
 
@@ -393,6 +393,7 @@ NapCat 单文件管理脚本，支持下载安装 NapCat、下载并编译 Linux
 ```bash
 bash napcat.sh deploy
 napcat install
+napcat install-qq
 napcat patch
 napcat start
 napcat stop
@@ -411,9 +412,10 @@ napcat -q
 
 说明：
 
-- `install` 会把 installer 下载到临时目录，非空和 `bash -n` 校验通过后执行；执行成功后才发布到 `napcat-install.sh`。
+- `install` 会把 installer 下载到临时目录，非空和 `bash -n` 校验通过后执行；执行成功后才发布到 `napcat-install.sh`，并确保 LinuxQQ 可执行文件可用。
+- `install-qq` 仅下载并安装当前可用的 LinuxQQ deb/rpm（旧 dldir1 下载链已 404）。
 - `patch` 会临时下载和编译 launcher，下载、编译或 chmod 失败时保留旧 `.so`。
-
+- 启动依赖：`napcat` 目录、`libnapcat_launcher.so`、`qq`、`Xvfb`。
 ## newapi.sh
 
 New API Docker Compose 管理脚本，默认管理已存在的 `/root/newapi-manual/docker-compose.yml` 服务栈，提供启动、停止、日志、状态、应用容器重启和镜像更新。

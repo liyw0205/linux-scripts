@@ -41,7 +41,8 @@ usage() {
   napcat restart              重启 NapCat
   napcat status               查看状态
   napcat log                  查看并跟随日志
-  napcat install              下载并安装 NapCat
+  napcat install              下载并安装 NapCat，并确保 LinuxQQ 可用
+  napcat install-qq           仅安装/修复 LinuxQQ
   napcat patch                下载并编译 NapCat Linux 启动器补丁
   napcat deploy               将本脚本安装到系统命令 (默认 /usr/local/bin/napcat)
   napcat -q 3834455831        设置 start 使用的 QQ 号
@@ -490,9 +491,178 @@ deploy_napcat() {
   echo "可直接使用: napcat <command>"
 }
 
+resolve_qq_bin() {
+  local candidate
+
+  # 显式指定时只认该路径，避免测试/自定义布局误命中系统 qq。
+  if [[ -n "${NAPCAT_QQ_BIN:-}" ]]; then
+    QQ_BIN="${NAPCAT_QQ_BIN}"
+    [[ -x "${QQ_BIN}" ]]
+    return $?
+  fi
+
+  candidate="$(command -v qq 2>/dev/null || true)"
+  if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+    QQ_BIN="${candidate}"
+    return 0
+  fi
+
+  for candidate in /usr/bin/qq /opt/QQ/qq /usr/local/bin/qq; do
+    if [[ -x "${candidate}" ]]; then
+      QQ_BIN="${candidate}"
+      return 0
+    fi
+  done
+
+  QQ_BIN="/usr/bin/qq"
+  return 1
+}
+
+detect_linux_arch() {
+  local arch_raw
+  arch_raw="$(uname -m 2>/dev/null || arch 2>/dev/null || true)"
+  case "${arch_raw}" in
+    x86_64|amd64)
+      printf '%s\n' "amd64"
+      ;;
+    aarch64|arm64)
+      printf '%s\n' "arm64"
+      ;;
+    *)
+      printf '%s\n' "${arch_raw:-unknown}"
+      ;;
+  esac
+}
+
+linuxqq_package_url() {
+  local arch="$1"
+  local installer="$2"
+
+  if [[ -n "${NAPCAT_QQ_PACKAGE_URL:-}" ]]; then
+    printf '%s\n' "${NAPCAT_QQ_PACKAGE_URL}"
+    return 0
+  fi
+
+  # 旧 dldir1.qq.com/QQNT/8015ff90 链接已 404；使用当前可用 QQNT deb/rpm。
+  if [[ "${arch}" == "amd64" ]]; then
+    if [[ "${installer}" == "rpm" ]]; then
+      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_x86_64_01.rpm"
+    else
+      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_amd64_01.deb"
+    fi
+  elif [[ "${arch}" == "arm64" ]]; then
+    if [[ "${installer}" == "rpm" ]]; then
+      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_aarch64_01.rpm"
+    else
+      printf '%s\n' "https://qqdl.gtimg.cn/qqfile/QQNT/9.9.32/release/c390e792/QQ_3.2.31_260710_arm64_01.deb"
+    fi
+  else
+    return 1
+  fi
+}
+
+run_privileged() {
+  if [[ "${EUID}" -eq 0 ]]; then
+    "$@"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+  else
+    echo "需要 root 权限安装 LinuxQQ，请使用 root 或安装 sudo" >&2
+    return 1
+  fi
+}
+
+install_linuxqq() {
+  local arch package_installer package_manager package_url tmp_dir package_file
+  local force="${1:-0}"
+
+  if [[ "${force}" != "1" ]] && resolve_qq_bin; then
+    echo "已检测到 LinuxQQ: ${QQ_BIN}"
+    return 0
+  fi
+
+  arch="$(detect_linux_arch)"
+  if [[ "${arch}" != "amd64" && "${arch}" != "arm64" ]]; then
+    echo "不支持的架构，无法安装 LinuxQQ: ${arch}" >&2
+    return 1
+  fi
+
+  if command -v dpkg >/dev/null 2>&1; then
+    package_installer="dpkg"
+    package_manager="apt-get"
+  elif command -v rpm >/dev/null 2>&1; then
+    package_installer="rpm"
+    if command -v dnf >/dev/null 2>&1; then
+      package_manager="dnf"
+    else
+      package_manager="rpm"
+    fi
+  else
+    echo "未找到 dpkg/rpm，无法安装 LinuxQQ" >&2
+    return 1
+  fi
+
+  package_url="$(linuxqq_package_url "${arch}" "${package_installer}")" || {
+    echo "无法确定 LinuxQQ 下载地址" >&2
+    return 1
+  }
+
+  echo "开始安装 LinuxQQ..."
+  echo "下载: ${package_url}"
+  tmp_dir="$(mktemp -d "${BASE_DIR}/.napcat-qq.XXXXXX")" || return 1
+  if [[ "${package_installer}" == "dpkg" ]]; then
+    package_file="${tmp_dir}/QQ.deb"
+  else
+    package_file="${tmp_dir}/QQ.rpm"
+  fi
+
+  if ! curl -k -fSL --connect-timeout 15 --max-time 600 -o "${package_file}" "${package_url}"; then
+    echo "LinuxQQ 下载失败: ${package_url}" >&2
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+  if [[ ! -s "${package_file}" ]]; then
+    echo "LinuxQQ 下载结果为空: ${package_url}" >&2
+    rm -rf "${tmp_dir}"
+    return 1
+  fi
+
+  if [[ "${package_manager}" == "apt-get" ]]; then
+    if ! run_privileged apt-get install -f -y --allow-downgrades -qq "${package_file}"; then
+      echo "LinuxQQ deb 安装失败" >&2
+      rm -rf "${tmp_dir}"
+      return 1
+    fi
+    run_privileged apt-get install -y --allow-downgrades -qq libnss3 libgbm1 >/dev/null 2>&1 || true
+    run_privileged apt-get install -y --allow-downgrades -qq libasound2 >/dev/null 2>&1 \
+      || run_privileged apt-get install -y --allow-downgrades -qq libasound2t64 >/dev/null 2>&1 \
+      || true
+  elif [[ "${package_manager}" == "dnf" ]]; then
+    if ! run_privileged dnf localinstall -y "${package_file}"; then
+      echo "LinuxQQ rpm 安装失败" >&2
+      rm -rf "${tmp_dir}"
+      return 1
+    fi
+  else
+    if ! run_privileged rpm -Uvh "${package_file}"; then
+      echo "LinuxQQ rpm 安装失败" >&2
+      rm -rf "${tmp_dir}"
+      return 1
+    fi
+  fi
+
+  rm -rf "${tmp_dir}"
+  hash -r 2>/dev/null || true
+  if ! resolve_qq_bin; then
+    echo "LinuxQQ 安装后仍未找到可执行文件 qq" >&2
+    return 1
+  fi
+  echo "LinuxQQ 安装完成: ${QQ_BIN}"
+}
+
 install_napcat() {
   local install_script="${BASE_DIR}/napcat-install.sh"
-  local installer_url="https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh"
+  local installer_url="${NAPCAT_INSTALLER_URL:-https://raw.githubusercontent.com/NapNeko/napcat-linux-installer/refs/heads/main/install.sh}"
   local tmp_dir tmp_script
 
   mkdir -p "${BASE_DIR}"
@@ -518,6 +688,14 @@ install_napcat() {
     return 1
   fi
   rm -rf "${tmp_dir}"
+
+  # 官方 installer 会装 LinuxQQ，但历史缓存/旧下载链可能失败；这里强制兜底。
+  if ! install_linuxqq; then
+    echo "NapCat 文件已安装，但 LinuxQQ 不可用" >&2
+    return 1
+  fi
+  echo "NapCat 安装完成"
+  echo "启动: napcat -q <QQ号> start"
 }
 
 require_install() {
@@ -533,8 +711,9 @@ require_install() {
     missing=1
   fi
 
-  if [[ ! -x "${QQ_BIN}" ]]; then
+  if ! resolve_qq_bin; then
     echo "缺少 QQ 可执行文件: ${QQ_BIN}" >&2
+    echo "可执行: napcat install-qq 或 napcat install" >&2
     missing=1
   fi
 
@@ -793,7 +972,9 @@ run_napcat() {
   local supervisor_pid="${BASHPID}"
   local xvfb_runner=()
 
-  if command -v xvfb-run >/dev/null 2>&1; then
+  # 有 Xvfb 时直接托管，避免 xvfb-run 包一层导致停服清理更难；
+  # 仅在缺少 Xvfb 时回退 xvfb-run。
+  if ! command -v Xvfb >/dev/null 2>&1 && command -v xvfb-run >/dev/null 2>&1; then
     xvfb_runner=(xvfb-run -a -s "-screen 0 1280x1024x24 +extension GLX +render")
   fi
 
@@ -1002,6 +1183,9 @@ main() {
       ;;
     install)
       install_napcat
+      ;;
+    install-qq|install_qq|qq-install)
+      install_linuxqq
       ;;
     patch)
       patch_napcat

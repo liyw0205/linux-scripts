@@ -784,7 +784,8 @@ sync_cmd() {
     ui_print "按远端列表同步本地配置和服务文件"
     local tmp
     tmp="$(mktemp "${TMP_ROOT%/}/cf_sync_list.XXXXXX")"
-    "$CLOUDFLARED_BIN" tunnel list 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9a-f-]{36}$/ {print $1, $2}' > "$tmp" || true
+    # mawk 不支持 {36} 量词，用 length + 字符类兼容。
+    "$CLOUDFLARED_BIN" tunnel list 2>/dev/null | awk 'NR>1 && length($1)==36 && $1 ~ /^[0-9a-f-]+$/ {print $1, $2}' > "$tmp" || true
 
     if [[ ! -s "$tmp" ]]; then
         rm -f "$tmp"
