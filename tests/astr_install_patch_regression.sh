@@ -152,6 +152,16 @@ ASTR_REPO_URL="$repo" install_astr >/dev/null
 assert_venv_activates "$VENV_DIR"
 assert_no_astr_temp "$TMP_DIR/existing-app"
 
+set_astr_paths reuse-existing-venv
+git clone -q "$repo" "$APP_DIR"
+python3 -m venv "$VENV_DIR"
+printf '%s\n' "shared-runtime" > "$VENV_DIR/shared-marker"
+ASTR_REPO_URL="$repo" install_astr >/dev/null
+[[ -d "$APP_DIR/.git" ]] || fail "existing app repo should be published"
+grep -qx "shared-runtime" "$VENV_DIR/shared-marker" || fail "usable existing venv must not be replaced"
+assert_venv_activates "$VENV_DIR"
+assert_no_astr_temp "$TMP_DIR/reuse-existing-venv"
+
 set_astr_paths repair-broken
 git clone -q "$repo" "$APP_DIR"
 bad_venv="$TMP_DIR/repair-broken/.venv.venv.bad"

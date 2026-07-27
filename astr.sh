@@ -217,8 +217,11 @@ install_astr() {
         return 1
     fi
     if [[ -d "${VENV_DIR}" && -n "$(ls -A "${VENV_DIR}" 2>/dev/null || true)" ]]; then
-        echo "虚拟环境目录已存在但不是完整安装，拒绝覆盖: ${VENV_DIR}" >&2
-        return 1
+        if ! venv_is_usable "${VENV_DIR}"; then
+            echo "虚拟环境目录已存在但不可用，拒绝覆盖: ${VENV_DIR}" >&2
+            return 1
+        fi
+        echo "复用已有虚拟环境，不删除或覆盖: ${VENV_DIR}"
     fi
 
     base_dir="$(dirname "${APP_DIR}")"
@@ -235,7 +238,12 @@ install_astr() {
         rm -rf "${tmp_app}"
         return 1
     fi
-    if ! build_venv_at_path "${VENV_DIR}" "${tmp_app}/requirements.txt"; then
+    if venv_is_usable "${VENV_DIR}"; then
+        if ! install_requirements "${VENV_DIR}" "${tmp_app}/requirements.txt"; then
+            rm -rf "${tmp_app}"
+            return 1
+        fi
+    elif ! build_venv_at_path "${VENV_DIR}" "${tmp_app}/requirements.txt"; then
         rm -rf "${tmp_app}"
         return 1
     fi
