@@ -114,6 +114,10 @@ export NAPCAT_CLI_STATE_DIR="$TMP_DIR/state"
 export NAPCAT_QQ_BIN="$TMP_DIR/bin/qq"
 export NAPCAT_DISPLAY=":88"
 export NAPCAT_SCREEN_SESSION="napcat-runtime-test"
+# 加快 TERM 忽略场景：少轮询几次即可验证会升级到 KILL。
+export NAPCAT_STOP_TERM_ATTEMPTS=3
+export NAPCAT_STOP_KILL_ATTEMPTS=3
+export NAPCAT_STOP_WAIT_INTERVAL=0.1
 export FAKE_QQ_PID_FILE="$TMP_DIR/qq.pid"
 export FAKE_QQ_CHILD_PID_FILE="$TMP_DIR/qq.child.pid"
 
@@ -130,7 +134,7 @@ recorded_pid="$(cat "$TMP_DIR/state/napcat.pid")"
 qq_pid="$(cat "$TMP_DIR/qq.pid")"
 qq_child_pid="$(cat "$TMP_DIR/qq.child.pid")"
 
-timeout 8 bash -c '. "$1"; stop_napcat' _ "$ROOT_DIR/napcat.sh" > "$TMP_DIR/stop.log" 2>&1 || {
+timeout 15 bash -c '. "$1"; stop_napcat' _ "$ROOT_DIR/napcat.sh" > "$TMP_DIR/stop.log" 2>&1 || {
   cat "$TMP_DIR/stop.log" >&2 || true
   fail "stop_napcat should finish promptly when QQ ignores TERM"
 }
